@@ -3,6 +3,7 @@
 #include <string.h>
 #include <inttypes.h>
 #include <time.h>
+#include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/uart.h"
@@ -26,8 +27,10 @@ char data[EXAMPLE_MAX_CHAR_SIZE];
 char GPS_output[EXAMPLE_MAX_CHAR_SIZE];
 char NMEA_data [6][15][15];
 char baud_rates[7][6] = {"4800", "9600", "14400", "19200", "38400", "57600", "115200"};
-
 int baud_rate = 6;
+
+// Method to determine when to start a new tracking
+int max_time_difference = 2; // Maximum time between points in seconds
 
 uart_config_t uart_config = 
 {
@@ -84,19 +87,18 @@ void write_waypoint(FILE *file, float lat, float lon, float ele, const char* tim
     fprintf(file, "  </wpt>\n");
 }
 
-void begin_track(FILE *file) {
+void begin_new_track(FILE *file, const char* time) {
     fprintf(file, "<trk>\n");
-    fprintf(file, "     <name>Test Track</name>\n");
-    fprintf(file, "     <type>Driving</type>\n");
+    fprintf(file, "     <name>Track %s</name>\n", time);
+    fprintf(file, "     <type>Placeholder</type>\n");
     fprintf(file, "<trkseg>\n");
     fprintf(file, "</trkseg>\n");
     fprintf(file, "</trk>\n");
+    fprintf(file, "</gpx>\n");
 }
 
-void write_track_point(FILE *file, float lat, float lon, float ele, const char* time) {
-    fprintf(file, "<trkpt lat=\"%.6f\" lon=\"%.6f\">\n", lat, lon);
-    fprintf(file, "<ele>%f</ele>\n", ele);
-    fprintf(file, "<time>%s</time></trkpt>\n", time);
+void write_track_point(FILE *file, float lat, float lon, float ele, const char* time, float HDOP) {
+    fprintf(file, "   <trkpt lat=\"%.6f\" lon=\"%.6f\"><ele>%f</ele><time>%s</time></trkpt><HDOP>%f</HDOP>\n", lat, lon, ele, time, HDOP);
 }
 
 int nmea0183_checksum(char *nmea_data)
@@ -155,230 +157,35 @@ float ConvertLongToDecimalDegrees(const char* LongStr, const char* LongDirection
     return decimalLongitude;
 }
 
-void ConvertDateandTimeFormat(const char* DateStr, const char* TimeStr, char* result) {
+void ConvertDateandTimeFormat(const char* DateStr, const char* TimeStr, char* result_gpx, int *unix_time) {
     int year, month, day, hour, minute; 
     float second;
 
     sscanf(DateStr, "%2d%2d%2d", &day, &month, &year);
     sscanf(TimeStr, "%2d%2d%6f", &hour, &minute, &second);
 
-    sprintf(result, "20%02d-%02d-%02dT%02d:%02d:%06.3fZ", year, month, day, hour, minute, second);
-}
-
-static void uart_task()
-{
-    while (1)
-    {   
-        int len = uart_read_bytes(UART_NUM_1, GPS_data, BUF_SIZE, 10);
-        
-        
-        if (len>0)
-        { 
-            GPS_data[len] = '\0';
-            
-            int j = 0;
-            int k = 0;
-            int l = 0;
-
-            char Sentance_Data[6];
-
-            Sentance_Data[5] = '\0';
-
-            for (size_t i = 0; i < len; i++)
-            {
-
-                if(GPS_data[i] == '$' && GPS_data[i+1] == 'G')
-                {
-                    strncpy(Sentance_Data, GPS_data+i+1, 5);
-                    
-
-                    l = 0;
+    struct tm time;
     
-                    if (strcmp("GPGLL",Sentance_Data) == 0)
-                    {
-                        j = 0;
-                        i+=5;
-                        l = 6;
-                        strncpy(NMEA_data[j][0], Sentance_Data, 6);  
-                    }
-                    else if (strcmp("GPRMC",Sentance_Data) == 0)
-                    {
-                        j = 1;
-                        i+=5;
-                        l = 6;
-                        strncpy(NMEA_data[j][0], Sentance_Data, 6);
-                    }
-                    else if (strcmp("GPVTG",Sentance_Data) == 0)
-                    {
-                        j = 2;
-                        i+=5;
-                        l = 6;
-                        strncpy(NMEA_data[j][0], Sentance_Data, 6);
-                    }
-                    else if (strcmp("GPGGA",Sentance_Data) == 0)
-                    {
-                        j = 3;
-                        i+=5;
-                        l = 6;
-                        strncpy(NMEA_data[j][0], Sentance_Data, 6);
-                    }
-                    else if (strcmp("GPGSA",Sentance_Data) == 0)
-                    {
-                        j = 4;
-                        i+=5;
-                        l = 6;
-                        strncpy(NMEA_data[j][0], Sentance_Data, 6);
-                    }
-                    else if (strcmp("GPGSV",Sentance_Data) == 0)
-                    {
-                        j = 5;
-                        i+=5;
-                        l = 6;
-                        strncpy(NMEA_data[j][0], Sentance_Data, 6);
-                    }
-                }
-                else if(GPS_data[i] == '$' && GPS_data[i+1] != 'G') 
-                {
-                    i++;
-                    while(GPS_data[i] != '$')
-                    {
-                        i++;
-                    }
-                }
-                else if (GPS_data[i] == ',')
-                {
-                    NMEA_data[j][k][l] = '\0';
-                    k+=1;
-                    l = 0;
-                }
-                else if (GPS_data[i] == '\r')
-                {
-                    ;
-                }
-                else if (GPS_data[i] == '\n')
-                {
-                    NMEA_data[j][k][l] = '\0';
-                    k = 0;
-                }
-                else if (GPS_data[i] != ',')
-                {
-                    NMEA_data[j][k][l] = GPS_data[i];
-                    l+=1;
-                }
-
-                
-            }
-            
-
-            // If data is valid
-            if (NMEA_data[1][2][0] == 'A')
-            {
-                // Valid GPS status LED is turned on
-                gpio_set_level(GPS_STATUS_LED, 1);
-
-                float latitude;
-                float longitude;
-                char GPX_Time[30];
-                float MSL = atof(NMEA_data[3][9]);
-                float geoid_sep = atof(NMEA_data[3][11]);
-                float elevation = MSL;
-
-                latitude = 0;
-                longitude = 0;
-
-
-                // Latitude, Longitude, and Time are all converted to a different format. See functions for details
-                latitude = ConvertLatToDecimalDegrees(NMEA_data[1][3], NMEA_data[1][4]);
-                longitude = ConvertLongToDecimalDegrees(NMEA_data[1][5], NMEA_data[1][6]);
-                ConvertDateandTimeFormat(NMEA_data[1][9], NMEA_data[1][1], GPX_Time);
-
-                
-                
-
-                
-
-                
-                char gpx_file_path[26]; 
-                strcpy(gpx_file_path, "\0");
-
-                strcat(gpx_file_path, "/sdcard/DATA_");
-                strcat(gpx_file_path, NMEA_data[1][9]);
-                strcat(gpx_file_path, ".gpx");
-
-                // Checks to see if GPX file is accessible. If not, it is generated
-                if (access(gpx_file_path, F_OK) == 0)
-                {
-                    
-                }
-                else
-                {
-                    printf(gpx_file_path);
-                    generate_gpx_file(gpx_file_path);
-                }
-
-                FILE *f_gpx = fopen(gpx_file_path, "r+");
-                if (f_gpx == NULL) 
-                {
-                    ESP_LOGE(TAG, "Failed to open file for writing");
-                }
-                else //removes the footer. Need to rework this later to just move the cursor
-                {
-                    fseek(f_gpx, -24, SEEK_END);
-                    write_track_point(f_gpx, latitude, longitude, elevation, GPX_Time);
-
-                    //printf("lat=%f, long=%f, ele=%f, time=%s\n", latitude, longitude, elevation, GPX_Time);
-
-                    fprintf(f_gpx, "</trkseg>\n");
-                    fprintf(f_gpx, "</trk>\n");
-                    fprintf(f_gpx, "</gpx>\n");
-                }
-
-                
-                
-                
-
-
-
-                strcpy(gpx_file_path, "\0");
-                strcpy(GPS_output, "\0");
-                fclose(f_gpx);
-            
-            }
-            // Data is not valid
-            else if (NMEA_data[1][2][0] == 'V')
-            {
-                gpio_set_level(GPS_STATUS_LED, 0);
-
-                float latitude;
-                float longitude;
-                char GPX_Time[30];
-
-                // Latitude, Longitude, and Time are all converted to a different format. See functions for details
-                latitude = ConvertLatToDecimalDegrees(NMEA_data[1][3], NMEA_data[1][4]);
-                longitude = ConvertLongToDecimalDegrees(NMEA_data[1][5], NMEA_data[1][6]);
-                ConvertDateandTimeFormat(NMEA_data[1][9], NMEA_data[1][1], GPX_Time);
-
-                printf("lat=%f, long=%f\n", latitude, longitude);
-
-                
-            }
-            
-            
-            
-            
-            uart_flush(UART_NUM_1);   
-        }     
-        
-    }
-
+    time.tm_year = year + 100;
+    time.tm_mon = month - 1;
+    time.tm_mday = day;
+    time.tm_hour = hour;
+    time.tm_min = minute;
+    time.tm_sec = floor(second);
     
 
+    *unix_time = mktime(&time);
+
+    sprintf(result_gpx, "20%02d-%02d-%02dT%02d:%02d:%06.3fZ", year, month, day, hour, minute, second);
+
+    //sprintf(unix_time, "20%02d%02d%02d%02d%02d%06.3f", year, month, day, hour, minute, second); 
 }
 
 void SD_Setup(void)
 {
     esp_err_t ret;
 
+    // If SD card fails to format, it will be formated 
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
     #ifdef CONFIG_EXAMPLE_FORMAT_IF_MOUNT_FAILED
         .format_if_mount_failed = true,
@@ -389,11 +196,13 @@ void SD_Setup(void)
         .allocation_unit_size = 16 * 1024
     };
 
+    // Defines the mount point for the SD card
     sdmmc_card_t *card;
     const char mount_point[] = MOUNT_POINT;
     
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
 
+    // SD cards spi bus is configured
     spi_bus_config_t bus_cfg = {
         .mosi_io_num = PIN_NUM_MOSI,
         .miso_io_num = PIN_NUM_MISO,
@@ -403,7 +212,7 @@ void SD_Setup(void)
         .max_transfer_sz = 4000,
     };
 
-
+    // Attempts to initalize the spi bus
     ret = spi_bus_initialize(host.slot, &bus_cfg, SDSPI_DEFAULT_DMA);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize bus.");
@@ -521,6 +330,226 @@ void UART_Setup()
 
 }
 
+static void UART_Task()
+{
+    int previous_point_time = 0;
+
+    while (1)
+    {   
+        int len = uart_read_bytes(UART_NUM_1, GPS_data, BUF_SIZE, 10);
+        
+        
+        if (len>0)
+        { 
+            GPS_data[len] = '\0';
+            
+            int j = 0;
+            int k = 0;
+            int l = 0;
+
+            char Sentance_Data[6];
+
+            Sentance_Data[5] = '\0';
+
+            for (size_t i = 0; i < len; i++)
+            {
+                if(GPS_data[i] == '$' && GPS_data[i+1] == 'G')
+                {
+                    strncpy(Sentance_Data, GPS_data+i+1, 5);
+                    
+
+                    l = 0;
+    
+                    if (strcmp("GPGLL",Sentance_Data) == 0)
+                    {
+                        j = 0;
+                        i+=5;
+                        l = 6;
+                        strncpy(NMEA_data[j][0], Sentance_Data, 6);  
+                    }
+                    else if (strcmp("GPRMC",Sentance_Data) == 0)
+                    {
+                        j = 1;
+                        i+=5;
+                        l = 6;
+                        strncpy(NMEA_data[j][0], Sentance_Data, 6);
+                    }
+                    else if (strcmp("GPVTG",Sentance_Data) == 0)
+                    {
+                        j = 2;
+                        i+=5;
+                        l = 6;
+                        strncpy(NMEA_data[j][0], Sentance_Data, 6);
+                    }
+                    else if (strcmp("GPGGA",Sentance_Data) == 0)
+                    {
+                        j = 3;
+                        i+=5;
+                        l = 6;
+                        strncpy(NMEA_data[j][0], Sentance_Data, 6);
+                    }
+                    else if (strcmp("GPGSA",Sentance_Data) == 0)
+                    {
+                        j = 4;
+                        i+=5;
+                        l = 6;
+                        strncpy(NMEA_data[j][0], Sentance_Data, 6);
+                    }
+                    else if (strcmp("GPGSV",Sentance_Data) == 0)
+                    {
+                        j = 5;
+                        i+=5;
+                        l = 6;
+                        strncpy(NMEA_data[j][0], Sentance_Data, 6);
+                    }
+                }
+                else if(GPS_data[i] == '$' && GPS_data[i+1] != 'G') 
+                {
+                    i++;
+                    while(GPS_data[i] != '$')
+                    {
+                        i++;
+                    }
+                }
+                else if (GPS_data[i] == ',')
+                {
+                    NMEA_data[j][k][l] = '\0';
+                    k+=1;
+                    l = 0;
+                }
+                else if (GPS_data[i] == '\r')
+                {
+                    ;
+                }
+                else if (GPS_data[i] == '\n')
+                {
+                    NMEA_data[j][k][l] = '\0';
+                    k = 0;
+                }
+                else if (GPS_data[i] != ',')
+                {
+                    NMEA_data[j][k][l] = GPS_data[i];
+                    l+=1;
+                }
+            }
+            
+
+            // If data is valid
+            if (NMEA_data[1][2][0] == 'A')
+            {
+                // Valid GPS status LED is turned on
+                gpio_set_level(GPS_STATUS_LED, 1);
+
+                float latitude;
+                float longitude;
+                char GPX_Time[30];
+                int unix_time;
+                float MSL = atof(NMEA_data[3][9]);
+                float geoid_sep = atof(NMEA_data[3][11]);
+                float elevation = MSL;
+                float HDOP = atof(NMEA_data[3][8]);
+
+                latitude = 0;
+                longitude = 0;
+                
+                // Conditions to determine whether data is saved
+                printf("HDOP= %f\n",HDOP);
+                if (HDOP <= 2.0)
+                {
+                    // Latitude, Longitude, and Time are all converted to a different format. See functions for details
+                    latitude = ConvertLatToDecimalDegrees(NMEA_data[1][3], NMEA_data[1][4]);
+                    longitude = ConvertLongToDecimalDegrees(NMEA_data[1][5], NMEA_data[1][6]);
+                    ConvertDateandTimeFormat(NMEA_data[1][9], NMEA_data[1][1], GPX_Time, &unix_time);
+                    
+                    char gpx_file_path[26]; 
+                    strcpy(gpx_file_path, "\0");
+
+                    strcat(gpx_file_path, "/sdcard/DATA_");
+                    strcat(gpx_file_path, NMEA_data[1][9]);
+                    strcat(gpx_file_path, ".gpx");
+
+                    // Checks to see if GPX file is accessible. If not, it is generated
+                    if (access(gpx_file_path, F_OK) == 0)
+                    {
+                        
+                    }
+                    else
+                    {
+                        generate_gpx_file(gpx_file_path);
+                    }
+
+                    FILE *f_gpx = fopen(gpx_file_path, "r+");
+                    if (f_gpx == NULL) 
+                    {
+                        ESP_LOGE(TAG, "Failed to open file for writing");
+                    }
+                    else //removes the footer. Need to rework this later to just move the cursor
+                    {
+                        if((unix_time - previous_point_time) <= 2)
+                        {
+                            fseek(f_gpx, -24, SEEK_END);
+                            write_track_point(f_gpx, latitude, longitude, elevation, GPX_Time, HDOP);
+
+                            fprintf(f_gpx, "</trkseg>\n");
+                            fprintf(f_gpx, "</trk>\n");
+                            fprintf(f_gpx, "</gpx>\n");
+                        }
+                        else
+                        {
+                            fseek(f_gpx, -7, SEEK_END);
+                            begin_new_track(f_gpx, GPX_Time);
+
+                            fseek(f_gpx, -24, SEEK_END);
+                            write_track_point(f_gpx, latitude, longitude, elevation, GPX_Time, HDOP);
+
+                            fprintf(f_gpx, "</trkseg>\n");
+                            fprintf(f_gpx, "</trk>\n");
+                            fprintf(f_gpx, "</gpx>\n");
+                        }
+                        previous_point_time = unix_time;
+                    }
+
+
+                    strcpy(gpx_file_path, "\0");
+                    strcpy(GPS_output, "\0");
+                    fclose(f_gpx);
+            
+
+                }
+            }
+
+            // Data is not valid
+            else if (NMEA_data[1][2][0] == 'V')
+            {
+                gpio_set_level(GPS_STATUS_LED, 0);
+
+                float latitude;
+                float longitude;
+                char GPX_Time[30];
+                int unix_time;
+
+                // Latitude, Longitude, and Time are all converted to a different format. See functions for details
+                latitude = ConvertLatToDecimalDegrees(NMEA_data[1][3], NMEA_data[1][4]);
+                longitude = ConvertLongToDecimalDegrees(NMEA_data[1][5], NMEA_data[1][6]);
+                ConvertDateandTimeFormat(NMEA_data[1][9], NMEA_data[1][1], GPX_Time, &unix_time);
+
+                //printf("time=%d\n", unix_time);
+
+                
+            }
+            
+            
+            
+            
+            uart_flush(UART_NUM_1);   
+        }     
+        
+    }
+
+    
+
+}
+
 void app_main(void)
 {
     GPIO_Setup();
@@ -528,8 +557,6 @@ void app_main(void)
     SD_Setup();
 
     UART_Setup();
-
     
-    
-    uart_task();
+    UART_Task();
 }
