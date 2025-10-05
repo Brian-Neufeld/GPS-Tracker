@@ -30,6 +30,9 @@ char GPS_output[EXAMPLE_MAX_CHAR_SIZE];
 char NMEA_data [6][15][15];
 char baud_rates[7][6] = {"4800", "9600", "14400", "19200", "38400", "57600", "115200"};
 int baud_rate = 6;
+int CD_status = 0;
+int CD_status_old = 0;
+int counter = 0;
 
 // Method to determine when to start a new tracking
 int max_time_difference = 2; // Maximum time between points in seconds
@@ -52,37 +55,45 @@ static const char *TAG = "example";
 #define PIN_NUM_MOSI  10
 #define PIN_NUM_CLK   8
 #define PIN_NUM_CS    4
+#define PIN_NUM_CD    7
+
+
+// If SD card fails to format, it will be formated 
+esp_vfs_fat_sdmmc_mount_config_t mount_config = {
+#ifdef CONFIG_EXAMPLE_FORMAT_IF_MOUNT_FAILED
+    .format_if_mount_failed = true,
+#else
+    .format_if_mount_failed = false,
+#endif
+    .max_files = 5,
+    .allocation_unit_size = 16 * 1024
+};
+
+// Defines the mount point for the SD card
+sdmmc_card_t *card;
+const char mount_point[] = MOUNT_POINT;
+
+sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+
+// SD cards spi bus is configured
+spi_bus_config_t bus_cfg = {
+    .mosi_io_num = PIN_NUM_MOSI,
+    .miso_io_num = PIN_NUM_MISO,
+    .sclk_io_num = PIN_NUM_CLK,
+    .quadwp_io_num = -1,
+    .quadhd_io_num = -1,
+    .max_transfer_sz = 4000,
+};
+
+
 
 void SD_Setup(void)
 {
     esp_err_t ret;
 
-    // If SD card fails to format, it will be formated 
-    esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-    #ifdef CONFIG_EXAMPLE_FORMAT_IF_MOUNT_FAILED
-        .format_if_mount_failed = true,
-    #else
-        .format_if_mount_failed = false,
-    #endif
-        .max_files = 5,
-        .allocation_unit_size = 16 * 1024
-    };
-
-    // Defines the mount point for the SD card
-    sdmmc_card_t *card;
-    const char mount_point[] = MOUNT_POINT;
-    
-    sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-
-    // SD cards spi bus is configured
-    spi_bus_config_t bus_cfg = {
-        .mosi_io_num = PIN_NUM_MOSI,
-        .miso_io_num = PIN_NUM_MISO,
-        .sclk_io_num = PIN_NUM_CLK,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-        .max_transfer_sz = 4000,
-    };
+    sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
+    slot_config.gpio_cs = 4;
+    slot_config.host_id = host.slot;
 
     // Attempts to initalize the spi bus
     ret = spi_bus_initialize(host.slot, &bus_cfg, SDSPI_DEFAULT_DMA);
@@ -90,11 +101,6 @@ void SD_Setup(void)
         ESP_LOGE(TAG, "Failed to initialize bus.");
         return;
     }
-
-    sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
-    slot_config.gpio_cs = 4;
-    slot_config.host_id = host.slot;
-    
 
     ESP_LOGI(TAG, "Mounting filesystem");
     ret = esp_vfs_fat_sdspi_mount(mount_point, &host, &slot_config, &mount_config, &card);
@@ -112,6 +118,8 @@ void SD_Setup(void)
     ESP_LOGI(TAG, "Filesystem mounted");
 
     sdmmc_card_print_info(stdout, card);
+
+    CD_status_old = 0;
 
 }
 
@@ -245,6 +253,8 @@ void GPIO_Setup(void)
     gpio_reset_pin(GPS_STATUS_LED);
     gpio_set_direction(GPS_STATUS_LED, GPIO_MODE_OUTPUT);
     gpio_set_level(GPS_STATUS_LED, 0);
+
+    gpio_set_direction(7, GPIO_MODE_INPUT);
 }
 
 void UART_Setup()
@@ -466,45 +476,11 @@ static void UART_Task()
                     strcat(gpx_file_path, ".gpx");
 
                     // Checks to see if GPX file is accessible. If not, it is generated
-                    if (access(gpx_file_path, F_OK) == 0)
-                    {
-                        printf("File access ok\n");
-                    }
-                    else
-                    {
-                        printf("Cannot access file\n");
-                        generate_gpx_file(gpx_file_path);
-                    }
+
 
                     FILE *f_gpx = fopen(gpx_file_path, "r+");
-                    if (!f_gpx)
-                        perror("fopen");
-
-                    if (f_gpx == NULL) 
-                    {
-                        ESP_LOGE(TAG, "Failed to open file for writing\n");
-
-
-                        sdmmc_card_t *card;
-                        const char mount_point[] = MOUNT_POINT;
-    
-                        sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-                        sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
-                        slot_config.gpio_cs = 4;
-                        slot_config.host_id = host.slot;
-                        esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-                        #ifdef CONFIG_EXAMPLE_FORMAT_IF_MOUNT_FAILED
-                            .format_if_mount_failed = true,
-                        #else
-                            .format_if_mount_failed = false,
-                        #endif
-                            .max_files = 5,
-                            .allocation_unit_size = 16 * 1024
-                        };
-
-                        esp_vfs_fat_sdspi_mount(mount_point, &host, &slot_config, &mount_config, &card);
-                    }
-                    else //removes the footer. Need to rework this later
+                    
+                    if (f_gpx != NULL)
                     {
                         if((unix_time - previous_point_time) <= 2)
                         {
@@ -529,77 +505,14 @@ static void UART_Task()
                         }
                         previous_point_time = unix_time;
                     }
-
-
-                    strcpy(gpx_file_path, "\0");
-                    strcpy(GPS_output, "\0");
-                    fclose(f_gpx);
-            
-
-                }
-            }
-
-            // Data is not valid
-            else if (NMEA_data[1][2][0] == 'V')
-            {
-                printf("Invalid data\n");
-                gpio_set_level(GPS_STATUS_LED, 0);
-                char gpx_file_path[19]; 
-                strcpy(gpx_file_path, "\0");
-
-                strcat(gpx_file_path, "/sdcard/DATA_TEST2");
-
-                FILE *f_gpx = fopen(gpx_file_path, "r+");
-                    
-                if (f_gpx != NULL)
-                {
-                    printf("File access ok\n");
-                    fprintf(f_gpx, "Test\n");
-
-                    strcpy(gpx_file_path, "\0");
-                    strcpy(GPS_output, "\0");
-                    fclose(f_gpx);
-                }
-                else
-                {
-                    printf("Cannot access file\n");
-
-                    esp_err_t ret;
-                    sdmmc_card_t *card;
-                    const char mount_point[] = MOUNT_POINT;
-
-                    sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-                    sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
-                    slot_config.gpio_cs = 4;
-                    slot_config.host_id = host.slot;
-                    esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-                    #ifdef CONFIG_EXAMPLE_FORMAT_IF_MOUNT_FAILED
-                        .format_if_mount_failed = true,
-                    #else
-                        .format_if_mount_failed = false,
-                    #endif
-                        .max_files = 5,
-                        .allocation_unit_size = 16 * 1024
-                    };
-
-                    
-                    esp_vfs_fat_sdcard_unmount(mount_point, card);
-
-                    ESP_LOGI(TAG, "Mounting filesystem");
-                    ret = esp_vfs_fat_sdspi_mount(mount_point, &host, &slot_config, &mount_config, &card);
-
-                    //generate_gpx_file(gpx_file_path);
-                    /*
-                    //FILE *f_gpx = fopen(gpx_file_path, "r+");
-                    if (f_gpx == NULL) 
+                    else
                     {
-                        ESP_LOGE(TAG, "Failed to open file for writing\n");
-                        perror("fopen");
+                        printf("Cannot access file\n");
 
-
+                        esp_err_t ret;
                         sdmmc_card_t *card;
                         const char mount_point[] = MOUNT_POINT;
-        
+
                         sdmmc_host_t host = SDSPI_HOST_DEFAULT();
                         sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
                         slot_config.gpio_cs = 4;
@@ -614,14 +527,118 @@ static void UART_Task()
                             .allocation_unit_size = 16 * 1024
                         };
 
-                        esp_vfs_fat_sdspi_mount(mount_point, &host, &slot_config, &mount_config, &card);
-                    }
-                    generate_gpx_file(gpx_file_path);*/
-                }
-                 
+                        
+                        esp_vfs_fat_sdcard_unmount(mount_point, card);
 
-                //FILE *f_gpx = fopen(gpx_file_path, "r+");
-                
+                        ESP_LOGI(TAG, "Mounting filesystem");
+                        ret = esp_vfs_fat_sdspi_mount(mount_point, &host, &slot_config, &mount_config, &card);
+
+                        generate_gpx_file(gpx_file_path);
+                    }
+                    
+
+
+                    strcpy(gpx_file_path, "\0");
+                    strcpy(GPS_output, "\0");
+                    fclose(f_gpx);
+            
+
+                }
+            }
+
+            // Data is not valid
+            else if (NMEA_data[1][2][0] == 'V')
+            {
+                //printf("Invalid data\n");
+                gpio_set_level(GPS_STATUS_LED, 0);
+                char gpx_file_path[19]; 
+                strcpy(gpx_file_path, "\0");
+
+                strcat(gpx_file_path, "/sdcard/DATA_TEST2");
+
+                CD_status = gpio_get_level(7);
+
+                printf("CD_Status: %d CD_Status: %d\n", CD_status, CD_status_old);
+
+                counter += 1;
+
+                    
+                if (CD_status == 1 && CD_status_old == 1)
+                {
+                    printf("card connected\n");
+
+                    FILE *f_gpx = fopen(gpx_file_path, "r+");
+
+                    if (f_gpx == NULL)
+                    {
+                        generate_gpx_file(gpx_file_path);
+                    }
+
+                    fseek(f_gpx, 0, SEEK_END);
+                    fprintf(f_gpx, "Test%d\n", counter);
+
+                    strcpy(gpx_file_path, "\0");
+                    strcpy(GPS_output, "\0");
+                    fclose(f_gpx);
+                    f_gpx = NULL;
+                    
+                    
+                }
+                else if (CD_status == 1 && CD_status_old == 0)
+                {
+                    printf("card reconnected, reinitialising\n");
+                    
+                    esp_err_t ret;
+                    
+                    sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
+                    slot_config.gpio_cs = 4;
+                    slot_config.host_id = host.slot;
+                    
+                    esp_vfs_fat_sdcard_unmount(mount_point, card);
+
+                    ESP_LOGI(TAG, "Mounting filesystem");
+                    ret = esp_vfs_fat_sdspi_mount(mount_point, &host, &slot_config, &mount_config, &card);
+
+                    if (ret != ESP_OK) {
+                        if (ret == ESP_FAIL) {
+                            ESP_LOGE(TAG, "Failed to mount filesystem. "
+                                    "If you want the card to be formatted, set the CONFIG_EXAMPLE_FORMAT_IF_MOUNT_FAILED menuconfig option.");
+                        } else {
+                            ESP_LOGE(TAG, "Failed to initialize the card (%s). "
+                                    "Make sure SD card lines have pull-up resistors in place.", esp_err_to_name(ret));
+                        }
+                        return;
+                    }
+                    ESP_LOGI(TAG, "Filesystem mounted");
+
+                    sdmmc_card_print_info(stdout, card);
+
+
+
+                    FILE *f_gpx = fopen(gpx_file_path, "r+");
+
+                    if (f_gpx == NULL)
+                    {
+                        generate_gpx_file(gpx_file_path);
+                    }
+                    else
+                    {
+                        fseek(f_gpx, 0, SEEK_END);
+                        fprintf(f_gpx, "Test - Reinitalised\n");
+
+                        strcpy(gpx_file_path, "\0");
+                        strcpy(GPS_output, "\0");
+                        fclose(f_gpx);
+                        f_gpx = NULL;
+                    }
+
+                    CD_status_old = 1;
+                }
+
+                if (CD_status == 0)
+                {
+                    CD_status_old = 0;
+                }
                 
                 
                 
@@ -632,7 +649,7 @@ static void UART_Task()
             
             uart_flush(UART_NUM_1);   
 
-            //gpio_set_level(GPS_STATUS_LED, 0);
+            
         }     
         
     }
