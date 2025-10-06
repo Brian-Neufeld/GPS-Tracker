@@ -327,13 +327,7 @@ static void UART_Task()
     while (1)
     {   
         int len = uart_read_bytes(UART_NUM_1, GPS_data, BUF_SIZE, 5);
-        //gpio_set_level(GPS_STATUS_LED, 1);
 
-        
-
-        //printf("%d\n", len);
-        
-        
         if (len>0)
         { 
             GPS_data[len] = '\0';
@@ -346,60 +340,60 @@ static void UART_Task()
             int k = 0;
             int l = 0;
 
-            char Sentance_Data[6];
+            char Sentence_Data[6];
 
-            Sentance_Data[5] = '\0';
+            Sentence_Data[5] = '\0';
 
             for (size_t i = 0; i < len; i++)
             {
                 if(GPS_data[i] == '$' && GPS_data[i+1] == 'G')
                 {
-                    strncpy(Sentance_Data, GPS_data+i+1, 5);
+                    strncpy(Sentence_Data, GPS_data+i+1, 5);
                     
 
                     l = 0;
     
-                    if (strcmp("GPGLL",Sentance_Data) == 0)
+                    if (strcmp("GPGLL",Sentence_Data) == 0)
                     {
                         j = 0;
                         i+=5;
                         l = 6;
-                        strncpy(NMEA_data[j][0], Sentance_Data, 6);  
+                        strncpy(NMEA_data[j][0], Sentence_Data, 6);  
                     }
-                    else if (strcmp("GPRMC",Sentance_Data) == 0)
+                    else if (strcmp("GPRMC",Sentence_Data) == 0)
                     {
                         j = 1;
                         i+=5;
                         l = 6;
-                        strncpy(NMEA_data[j][0], Sentance_Data, 6);
+                        strncpy(NMEA_data[j][0], Sentence_Data, 6);
                     }
-                    else if (strcmp("GPVTG",Sentance_Data) == 0)
+                    else if (strcmp("GPVTG",Sentence_Data) == 0)
                     {
                         j = 2;
                         i+=5;
                         l = 6;
-                        strncpy(NMEA_data[j][0], Sentance_Data, 6);
+                        strncpy(NMEA_data[j][0], Sentence_Data, 6);
                     }
-                    else if (strcmp("GPGGA",Sentance_Data) == 0)
+                    else if (strcmp("GPGGA",Sentence_Data) == 0)
                     {
                         j = 3;
                         i+=5;
                         l = 6;
-                        strncpy(NMEA_data[j][0], Sentance_Data, 6);
+                        strncpy(NMEA_data[j][0], Sentence_Data, 6);
                     }
-                    else if (strcmp("GPGSA",Sentance_Data) == 0)
+                    else if (strcmp("GPGSA",Sentence_Data) == 0)
                     {
                         j = 4;
                         i+=5;
                         l = 6;
-                        strncpy(NMEA_data[j][0], Sentance_Data, 6);
+                        strncpy(NMEA_data[j][0], Sentence_Data, 6);
                     }
-                    else if (strcmp("GPGSV",Sentance_Data) == 0)
+                    else if (strcmp("GPGSV",Sentence_Data) == 0)
                     {
                         j = 5;
                         i+=5;
                         l = 6;
-                        strncpy(NMEA_data[j][0], Sentance_Data, 6);
+                        strncpy(NMEA_data[j][0], Sentence_Data, 6);
                     }
                 }
                 else if(GPS_data[i] == '$' && GPS_data[i+1] != 'G') 
@@ -432,14 +426,14 @@ static void UART_Task()
                 }
             }
 
-            //printf("%d\n", NMEA_data[0][0][1]);
+            printf("Here\n");
             
 
             // If data is valid
             if (NMEA_data[1][2][0] == 'A')
             {
                 // Valid GPS status LED is turned on
-                //printf("Valid data");
+                printf("Valid data\n");
                 gpio_set_level(GPS_STATUS_LED, 1);
 
                 float latitude;
@@ -454,11 +448,12 @@ static void UART_Task()
                 latitude = 0;
                 longitude = 0;
 
-                printf(NMEA_data[1][2][0]);
+                //printf(NMEA_data[1][2][0]);
                 
                 // Conditions to determine whether data is saved
                 printf("HDOP= %f\n", HDOP);
-                if (HDOP <= 5)
+
+                if (HDOP <= 50)
                 {
                     // Latitude, Longitude, and Time are all converted to a different format. See functions for details
                     latitude = ConvertLatToDecimalDegrees(NMEA_data[1][3], NMEA_data[1][4]);
@@ -475,13 +470,22 @@ static void UART_Task()
                     //printf("Date= %s\n", NMEA_data[1][9]);
                     strcat(gpx_file_path, ".gpx");
 
-                    // Checks to see if GPX file is accessible. If not, it is generated
+                    CD_status = gpio_get_level(7);
+
+                    printf("CD_Status: %d CD_Status: %d\n", CD_status, CD_status_old);
 
 
-                    FILE *f_gpx = fopen(gpx_file_path, "r+");
-                    
-                    if (f_gpx != NULL)
+                    if (CD_status == 1 && CD_status_old == 1)
                     {
+                        printf("card connected\n");
+
+                        FILE *f_gpx = fopen(gpx_file_path, "r+");
+
+                        if (f_gpx == NULL)
+                        {
+                            generate_gpx_file(gpx_file_path);
+                        }
+                    
                         if((unix_time - previous_point_time) <= 2)
                         {
                             fseek(f_gpx, -24, SEEK_END);
@@ -504,43 +508,65 @@ static void UART_Task()
                             fprintf(f_gpx, "</gpx>\n");
                         }
                         previous_point_time = unix_time;
+
+                        fclose(f_gpx);
+                        f_gpx = NULL;
                     }
-                    else
+                    else if (CD_status == 1 && CD_status_old == 0)
                     {
-                        printf("Cannot access file\n");
-
+                        printf("card reconnected, reinitialising\n");
+                        
                         esp_err_t ret;
-                        sdmmc_card_t *card;
-                        const char mount_point[] = MOUNT_POINT;
-
-                        sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+                        
                         sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
                         slot_config.gpio_cs = 4;
                         slot_config.host_id = host.slot;
-                        esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-                        #ifdef CONFIG_EXAMPLE_FORMAT_IF_MOUNT_FAILED
-                            .format_if_mount_failed = true,
-                        #else
-                            .format_if_mount_failed = false,
-                        #endif
-                            .max_files = 5,
-                            .allocation_unit_size = 16 * 1024
-                        };
-
                         
                         esp_vfs_fat_sdcard_unmount(mount_point, card);
 
                         ESP_LOGI(TAG, "Mounting filesystem");
                         ret = esp_vfs_fat_sdspi_mount(mount_point, &host, &slot_config, &mount_config, &card);
 
-                        generate_gpx_file(gpx_file_path);
+                        if (ret != ESP_OK) {
+                            if (ret == ESP_FAIL) {
+                                ESP_LOGE(TAG, "Failed to mount filesystem. "
+                                        "If you want the card to be formatted, set the CONFIG_EXAMPLE_FORMAT_IF_MOUNT_FAILED menuconfig option.");
+                            } else {
+                                ESP_LOGE(TAG, "Failed to initialize the card (%s). "
+                                        "Make sure SD card lines have pull-up resistors in place.", esp_err_to_name(ret));
+                            }
+                            return;
+                        }
+                        ESP_LOGI(TAG, "Filesystem mounted");
+
+                        sdmmc_card_print_info(stdout, card);
+
+
+
+                        FILE *f_gpx = fopen(gpx_file_path, "r+");
+
+                        if (f_gpx == NULL)
+                        {
+                            generate_gpx_file(gpx_file_path);
+                        }
+                        else
+                        {
+                            fseek(f_gpx, 0, SEEK_END);
+                            //fprintf(f_gpx, "Reinitalised\n");
+
+                            strcpy(gpx_file_path, "\0");
+                            strcpy(GPS_output, "\0");
+                            fclose(f_gpx);
+                            f_gpx = NULL;
+                        }
+
+                        CD_status_old = 1;
                     }
-                    
 
-
-                    strcpy(gpx_file_path, "\0");
-                    strcpy(GPS_output, "\0");
-                    fclose(f_gpx);
+                    if (CD_status == 0)
+                    {
+                        CD_status_old = 0;
+                    }
             
 
                 }
@@ -558,14 +584,14 @@ static void UART_Task()
 
                 CD_status = gpio_get_level(7);
 
-                printf("CD_Status: %d CD_Status: %d\n", CD_status, CD_status_old);
+                //printf("CD_Status: %d CD_Status: %d\n", CD_status, CD_status_old);
 
                 counter += 1;
 
                     
                 if (CD_status == 1 && CD_status_old == 1)
                 {
-                    printf("card connected\n");
+                    //printf("card connected\n");
 
                     FILE *f_gpx = fopen(gpx_file_path, "r+");
 
@@ -586,7 +612,7 @@ static void UART_Task()
                 }
                 else if (CD_status == 1 && CD_status_old == 0)
                 {
-                    printf("card reconnected, reinitialising\n");
+                    //printf("card reconnected, reinitialising\n");
                     
                     esp_err_t ret;
                     
