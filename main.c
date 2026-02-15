@@ -1,3 +1,9 @@
+// https://cdn.sparkfun.com/datasheets/Sensors/GPS/NMEA%20Reference%20Manual1.pdf
+// https://cdn-shop.adafruit.com/datasheets/PMTK%20command%20packet-Complete-C39-A01.pdf
+// https://cdn.sparkfun.com/assets/parts/1/2/2/8/0/PMTK_Packet_User_Manual.pdf
+
+
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,8 +21,10 @@
 #include <sys/stat.h>
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
+#include "driver/sdspi_host.h"
+#include "driver/spi_common.h"
 #include "driver/gpio.h"
-//#include "esp_timer.h"
+
 
 
 #define GPS_STATUS_LED GPIO_NUM_6
@@ -33,6 +41,7 @@ int baud_rate = 6;
 int CD_status = 0;
 int CD_status_old = 0;
 int counter = 0;
+int SDMMC_TIMEOUT_MS = 500;
 
 // Method to determine when to start a new tracking
 int max_time_difference = 2; // Maximum time between points in seconds
@@ -74,6 +83,7 @@ sdmmc_card_t *card;
 const char mount_point[] = MOUNT_POINT;
 
 sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+
 
 // SD cards spi bus is configured
 spi_bus_config_t bus_cfg = {
@@ -117,7 +127,7 @@ void SD_Setup(void)
     }
     ESP_LOGI(TAG, "Filesystem mounted");
 
-    sdmmc_card_print_info(stdout, card);
+    //sdmmc_card_print_info(stdout, card);
 
     CD_status_old = 0;
 
@@ -129,6 +139,9 @@ void generate_gpx_file(char* filename) {
     FILE *f_gpx = fopen(filename, "a+");
     if (f_gpx == NULL) {
         ESP_LOGE(TAG, "Failed to open file for writing");
+
+        
+        
     }
     else
     {
@@ -254,8 +267,21 @@ void GPIO_Setup(void)
     gpio_set_direction(GPS_STATUS_LED, GPIO_MODE_OUTPUT);
     gpio_set_level(GPS_STATUS_LED, 0);
 
-    gpio_set_direction(7, GPIO_MODE_INPUT);
+    gpio_set_direction(PIN_NUM_CD, GPIO_MODE_INPUT);
+
+    gpio_set_intr_type(PIN_NUM_CD, GPIO_INTR_NEGEDGE);
 }
+
+static const char *TAG2 = "GPIO_INT";
+
+static void IRAM_ATTR gpio_isr_handler(void* arg)
+{
+    uint32_t gpio_num = (uint32_t) arg;
+    ESP_EARLY_LOGI(TAG2, "GPIO %d went LOW", gpio_num);
+}
+
+
+
 
 void UART_Setup()
 {
@@ -298,24 +324,51 @@ void UART_Setup()
 
 
     uart_flush(UART_NUM_1);
+    uart_flush_input(UART_NUM_1);
     
     uart_write_bytes(UART_NUM_1, (const char*)GPS_NMEA_sentence_command, 53);
     uart_wait_tx_done(UART_NUM_1, 100);
 
-    uart_write_bytes(UART_NUM_1, (const char*)GPS_rate_command_slow, 21);
-    uart_wait_tx_done(UART_NUM_1, 100);
+    uart_read_bytes(UART_NUM_1, GPS_data, BUF_SIZE, 5);
 
-    uart_write_bytes(UART_NUM_1, (const char*)GPS_data_port_info, 15);
+    //printf("%s\n", GPS_data);
+    if(GPS_data[13] == '2')
+    {
+        printf("\nOutput Sentence Command Failed\n");
+    }
+    else if(GPS_data[13] == '3')
+    {
+        printf("\nOutput Sentence Command Succeeded\n");
+    }
+
+    uart_flush(UART_NUM_1);
+    uart_flush_input(UART_NUM_1);
+
+
+    uart_write_bytes(UART_NUM_1, (const char*)GPS_rate_command_fast, 20);
     uart_wait_tx_done(UART_NUM_1, 100);
 
     uart_read_bytes(UART_NUM_1, GPS_data, BUF_SIZE, 5);
-    printf("%s\n", GPS_data);
+
+    //printf("%s\n", GPS_data);
+    if(GPS_data[13] == '2')
+    {
+        printf("Output Rate Command Failed\n");
+    }
+    else if(GPS_data[13] == '3')
+    {
+        printf("Output Rate Command Succeeded\n");
+    }
+
+    uart_flush(UART_NUM_1);
+    uart_flush_input(UART_NUM_1);
+
 
     int actual_baudrate;
 
     uart_get_baudrate(UART_NUM_1, &actual_baudrate);
 
-    printf("%d\n", actual_baudrate);
+    printf("Output Baudrate: %d\n", actual_baudrate);
 
 
 }
@@ -333,7 +386,7 @@ static void UART_Task()
             GPS_data[len] = '\0';
 
             //printf("%d\n", len);
-            printf("\n%s", GPS_data);
+            //printf("\n%s", GPS_data);
 
             
             int j = 0;
@@ -426,15 +479,15 @@ static void UART_Task()
                 }
             }
 
-            printf("Here\n");
-            
 
             // If data is valid
             if (NMEA_data[1][2][0] == 'A')
             {
                 // Valid GPS status LED is turned on
-                printf("Valid data\n");
+                //printf("Valid data\n");
                 gpio_set_level(GPS_STATUS_LED, 1);
+
+                printf("CD_Status: %d CD_Status_Old: %d\n", CD_status, CD_status_old);
 
                 float latitude;
                 float longitude;
@@ -451,9 +504,9 @@ static void UART_Task()
                 //printf(NMEA_data[1][2][0]);
                 
                 // Conditions to determine whether data is saved
-                printf("HDOP= %f\n", HDOP);
+                //printf("HDOP= %f\n", HDOP);
 
-                if (HDOP <= 50)
+                if (HDOP <= 5)
                 {
                     // Latitude, Longitude, and Time are all converted to a different format. See functions for details
                     latitude = ConvertLatToDecimalDegrees(NMEA_data[1][3], NMEA_data[1][4]);
@@ -472,14 +525,17 @@ static void UART_Task()
 
                     CD_status = gpio_get_level(7);
 
-                    printf("CD_Status: %d CD_Status: %d\n", CD_status, CD_status_old);
+                    //printf("CD_Status: %d CD_Status: %d\n", CD_status, CD_status_old);
 
 
                     if (CD_status == 1 && CD_status_old == 1)
                     {
                         printf("card connected\n");
 
+                        
+
                         FILE *f_gpx = fopen(gpx_file_path, "r+");
+                        
 
                         if (f_gpx == NULL)
                         {
@@ -497,6 +553,7 @@ static void UART_Task()
                         }
                         else
                         {
+                            printf("starting new track");
                             fseek(f_gpx, -7, SEEK_END);
                             begin_new_track(f_gpx, GPX_Time);
 
@@ -515,19 +572,38 @@ static void UART_Task()
                     else if (CD_status == 1 && CD_status_old == 0)
                     {
                         printf("card reconnected, reinitialising\n");
-                        
+
                         esp_err_t ret;
-                        
+
                         sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
                         slot_config.gpio_cs = 4;
                         slot_config.host_id = host.slot;
-                        
+
+                        printf("SDSPI configured\n");
+                            
                         esp_vfs_fat_sdcard_unmount(mount_point, card);
 
-                        ESP_LOGI(TAG, "Mounting filesystem");
+                        printf("card unmounted\n");
+
                         ret = esp_vfs_fat_sdspi_mount(mount_point, &host, &slot_config, &mount_config, &card);
 
-                        if (ret != ESP_OK) {
+                        printf("attempting to mount card\n");
+
+                        while (ret != ESP_OK) {
+                            sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
+                            slot_config.gpio_cs = 4;
+                            slot_config.host_id = host.slot;
+
+                            printf("SDSPI configured\n");
+                            
+                            esp_vfs_fat_sdcard_unmount(mount_point, card);
+
+                            printf("card unmounted\n");
+                            
+                            ret = esp_vfs_fat_sdspi_mount(mount_point, &host, &slot_config, &mount_config, &card);
+
+                            printf("attempting to mount card\n");
+
                             if (ret == ESP_FAIL) {
                                 ESP_LOGE(TAG, "Failed to mount filesystem. "
                                         "If you want the card to be formatted, set the CONFIG_EXAMPLE_FORMAT_IF_MOUNT_FAILED menuconfig option.");
@@ -535,11 +611,9 @@ static void UART_Task()
                                 ESP_LOGE(TAG, "Failed to initialize the card (%s). "
                                         "Make sure SD card lines have pull-up resistors in place.", esp_err_to_name(ret));
                             }
-                            return;
+                            
                         }
-                        ESP_LOGI(TAG, "Filesystem mounted");
-
-                        sdmmc_card_print_info(stdout, card);
+                        
 
 
 
@@ -551,13 +625,29 @@ static void UART_Task()
                         }
                         else
                         {
-                            fseek(f_gpx, 0, SEEK_END);
-                            //fprintf(f_gpx, "Reinitalised\n");
+                            if((unix_time - previous_point_time) <= 2)
+                            {
+                                fseek(f_gpx, -24, SEEK_END);
+                                write_track_point(f_gpx, latitude, longitude, elevation, GPX_Time, HDOP);
 
-                            strcpy(gpx_file_path, "\0");
-                            strcpy(GPS_output, "\0");
-                            fclose(f_gpx);
-                            f_gpx = NULL;
+                                fprintf(f_gpx, "</trkseg>\n");
+                                fprintf(f_gpx, "</trk>\n");
+                                fprintf(f_gpx, "</gpx>\n");
+                            }
+                            else
+                            {
+                                printf("starting new track");
+                                fseek(f_gpx, -7, SEEK_END);
+                                begin_new_track(f_gpx, GPX_Time);
+
+                                fseek(f_gpx, -24, SEEK_END);
+                                write_track_point(f_gpx, latitude, longitude, elevation, GPX_Time, HDOP);
+
+                                fprintf(f_gpx, "</trkseg>\n");
+                                fprintf(f_gpx, "</trk>\n");
+                                fprintf(f_gpx, "</gpx>\n");
+                            }
+                            previous_point_time = unix_time;
                         }
 
                         CD_status_old = 1;
@@ -565,6 +655,8 @@ static void UART_Task()
 
                     if (CD_status == 0)
                     {
+                        printf("No Card Detected\n");
+
                         CD_status_old = 0;
                     }
             
@@ -577,21 +669,21 @@ static void UART_Task()
             {
                 //printf("Invalid data\n");
                 gpio_set_level(GPS_STATUS_LED, 0);
-                char gpx_file_path[19]; 
+                char gpx_file_path[23]; 
                 strcpy(gpx_file_path, "\0");
 
-                strcat(gpx_file_path, "/sdcard/DATA_TEST2");
+                strcat(gpx_file_path, "/sdcard/DATA_TEST2.txt");
 
                 CD_status = gpio_get_level(7);
 
-                //printf("CD_Status: %d CD_Status: %d\n", CD_status, CD_status_old);
+                printf("CD_Status: %d CD_Status_Old: %d\n", CD_status, CD_status_old);
 
                 counter += 1;
 
                     
                 if (CD_status == 1 && CD_status_old == 1)
                 {
-                    //printf("card connected\n");
+                    printf("card connected\n");
 
                     FILE *f_gpx = fopen(gpx_file_path, "r+");
 
@@ -600,19 +692,18 @@ static void UART_Task()
                         generate_gpx_file(gpx_file_path);
                     }
 
-                    fseek(f_gpx, 0, SEEK_END);
-                    fprintf(f_gpx, "Test%d\n", counter);
+                    //fseek(f_gpx, 0, SEEK_END);
+                    //fprintf(f_gpx, "Test%d\n", counter);
 
-                    strcpy(gpx_file_path, "\0");
-                    strcpy(GPS_output, "\0");
+                    //strcpy(gpx_file_path, "\0");
+                    //strcpy(GPS_output, "\0");
                     fclose(f_gpx);
                     f_gpx = NULL;
-                    
                     
                 }
                 else if (CD_status == 1 && CD_status_old == 0)
                 {
-                    //printf("card reconnected, reinitialising\n");
+                    printf("card reconnected, reinitialising\n");
                     
                     esp_err_t ret;
                     
@@ -622,7 +713,9 @@ static void UART_Task()
                     
                     esp_vfs_fat_sdcard_unmount(mount_point, card);
 
-                    ESP_LOGI(TAG, "Mounting filesystem");
+                    //ESP_LOGI(TAG, "Mounting filesystem");
+                    printf("Mounting Filesystem");
+
                     ret = esp_vfs_fat_sdspi_mount(mount_point, &host, &slot_config, &mount_config, &card);
 
                     if (ret != ESP_OK) {
@@ -635,9 +728,10 @@ static void UART_Task()
                         }
                         return;
                     }
-                    ESP_LOGI(TAG, "Filesystem mounted");
+                    //ESP_LOGI(TAG, "Filesystem mounted");
+                    printf("Filesystem Mounted");
 
-                    sdmmc_card_print_info(stdout, card);
+                    //sdmmc_card_print_info(stdout, card);
 
 
 
@@ -650,10 +744,10 @@ static void UART_Task()
                     else
                     {
                         fseek(f_gpx, 0, SEEK_END);
-                        fprintf(f_gpx, "Test - Reinitalised\n");
+                        //fprintf(f_gpx, "Test - Reinitalised\n");
 
-                        strcpy(gpx_file_path, "\0");
-                        strcpy(GPS_output, "\0");
+                        //strcpy(gpx_file_path, "\0");
+                        //strcpy(GPS_output, "\0");
                         fclose(f_gpx);
                         f_gpx = NULL;
                     }
@@ -663,6 +757,8 @@ static void UART_Task()
 
                 if (CD_status == 0)
                 {
+                    printf("No Card Detected");
+
                     CD_status_old = 0;
                 }
                 
@@ -670,23 +766,19 @@ static void UART_Task()
                 
             }
             
-            
-            
-            
             uart_flush(UART_NUM_1);   
-
-            
         }     
-        
     }
-
-    
-
 }
 
 void app_main(void)
 {
     GPIO_Setup();
+
+    gpio_install_isr_service(0);
+
+    // Attach ISR handler
+    gpio_isr_handler_add(PIN_NUM_CD, gpio_isr_handler, (void*) PIN_NUM_CD);
     
     SD_Setup();
 
