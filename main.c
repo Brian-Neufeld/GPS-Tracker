@@ -40,6 +40,7 @@ char baud_rates[7][6] = {"4800", "9600", "14400", "19200", "38400", "57600", "11
 int baud_rate = 6;
 int CD_status = 0;
 int CD_status_old = 0;
+bool card_change = true;
 int counter = 0;
 int SDMMC_TIMEOUT_MS = 500;
 
@@ -197,7 +198,8 @@ void intToHexString(int num, char *hexStr)
     sprintf(hexStr, "%x", num);  // Convert integer to hex string
 }
 
-float ConvertLatToDecimalDegrees(const char* LatStr, const char* LatDirection) {
+float ConvertLatToDecimalDegrees(const char* LatStr, const char* LatDirection)
+{
     int degrees, minutes;
     float decimalMinutes;
     float decimalLatitude;
@@ -216,7 +218,8 @@ float ConvertLatToDecimalDegrees(const char* LatStr, const char* LatDirection) {
     return decimalLatitude;
 }
 
-float ConvertLongToDecimalDegrees(const char* LongStr, const char* LongDirection) {
+float ConvertLongToDecimalDegrees(const char* LongStr, const char* LongDirection)
+{
     int degrees, minutes;
     float decimalMinutes;
     float decimalLongitude;
@@ -236,7 +239,8 @@ float ConvertLongToDecimalDegrees(const char* LongStr, const char* LongDirection
     return decimalLongitude;
 }
 
-void ConvertDateandTimeFormat(const char* DateStr, const char* TimeStr, char* result_gpx, int *unix_time) {
+void ConvertDateandTimeFormat(const char* DateStr, const char* TimeStr, char* result_gpx, int *unix_time)
+{
     int year, month, day, hour, minute; 
     float second;
 
@@ -269,19 +273,63 @@ void GPIO_Setup(void)
 
     gpio_set_direction(PIN_NUM_CD, GPIO_MODE_INPUT);
 
-    gpio_set_intr_type(PIN_NUM_CD, GPIO_INTR_NEGEDGE);
+    gpio_set_intr_type(PIN_NUM_CD, GPIO_INTR_ANYEDGE);
 }
+
+void card_reinitalization()
+{
+    esp_err_t ret;
+
+    sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
+    slot_config.gpio_cs = 4;
+    slot_config.host_id = host.slot;
+        
+    esp_vfs_fat_sdcard_unmount(mount_point, card);
+
+    ret = esp_vfs_fat_sdspi_mount(mount_point, &host, &slot_config, &mount_config, &card);
+
+    while (ret != ESP_OK) {
+        sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
+        slot_config.gpio_cs = 4;
+        slot_config.host_id = host.slot;
+        
+        esp_vfs_fat_sdcard_unmount(mount_point, card);
+        
+        ret = esp_vfs_fat_sdspi_mount(mount_point, &host, &slot_config, &mount_config, &card);
+    }
+
+    if (ret != ESP_OK) {
+        if (ret == ESP_FAIL) {
+            ESP_LOGE(TAG, "Failed to mount filesystem. "
+                    "If you want the card to be formatted, set the CONFIG_EXAMPLE_FORMAT_IF_MOUNT_FAILED menuconfig option.");
+        } else {
+            ESP_LOGE(TAG, "Failed to initialize the card (%s). "
+                    "Make sure SD card lines have pull-up resistors in place.", esp_err_to_name(ret));
+        }
+        return;
+    }
+}
+
 
 static const char *TAG2 = "GPIO_INT";
 
 static void IRAM_ATTR gpio_isr_handler(void* arg)
 {
     uint32_t gpio_num = (uint32_t) arg;
-    ESP_EARLY_LOGI(TAG2, "GPIO %d went LOW", gpio_num);
+
+    gpio_intr_disable(gpio_num);
+    
+    int level = gpio_get_level(gpio_num);
+
+    if (level == 1) {
+        // Rising edge
+        //ESP_EARLY_LOGI(TAG, "GPIO %lu is HIGH", gpio_num);
+    } else {
+        // Falling edge
+        //ESP_EARLY_LOGI(TAG, "GPIO %lu is LOW", gpio_num);
+    }
+    gpio_intr_enable(gpio_num); 
 }
-
-
-
 
 void UART_Setup()
 {
@@ -487,7 +535,6 @@ static void UART_Task()
                 //printf("Valid data\n");
                 gpio_set_level(GPS_STATUS_LED, 1);
 
-                printf("CD_Status: %d CD_Status_Old: %d\n", CD_status, CD_status_old);
 
                 float latitude;
                 float longitude;
@@ -501,12 +548,8 @@ static void UART_Task()
                 latitude = 0;
                 longitude = 0;
 
-                //printf(NMEA_data[1][2][0]);
-                
-                // Conditions to determine whether data is saved
-                //printf("HDOP= %f\n", HDOP);
 
-                if (HDOP <= 5)
+                if (HDOP <= 50)
                 {
                     // Latitude, Longitude, and Time are all converted to a different format. See functions for details
                     latitude = ConvertLatToDecimalDegrees(NMEA_data[1][3], NMEA_data[1][4]);
@@ -530,10 +573,7 @@ static void UART_Task()
 
                     if (CD_status == 1 && CD_status_old == 1)
                     {
-                        printf("card connected\n");
-
-                        
-
+                    
                         FILE *f_gpx = fopen(gpx_file_path, "r+");
                         
 
@@ -573,50 +613,8 @@ static void UART_Task()
                     {
                         printf("card reconnected, reinitialising\n");
 
-                        esp_err_t ret;
-
-                        sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
-                        slot_config.gpio_cs = 4;
-                        slot_config.host_id = host.slot;
-
-                        printf("SDSPI configured\n");
-                            
-                        esp_vfs_fat_sdcard_unmount(mount_point, card);
-
-                        printf("card unmounted\n");
-
-                        ret = esp_vfs_fat_sdspi_mount(mount_point, &host, &slot_config, &mount_config, &card);
-
-                        printf("attempting to mount card\n");
-
-                        while (ret != ESP_OK) {
-                            sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
-                            slot_config.gpio_cs = 4;
-                            slot_config.host_id = host.slot;
-
-                            printf("SDSPI configured\n");
-                            
-                            esp_vfs_fat_sdcard_unmount(mount_point, card);
-
-                            printf("card unmounted\n");
-                            
-                            ret = esp_vfs_fat_sdspi_mount(mount_point, &host, &slot_config, &mount_config, &card);
-
-                            printf("attempting to mount card\n");
-
-                            if (ret == ESP_FAIL) {
-                                ESP_LOGE(TAG, "Failed to mount filesystem. "
-                                        "If you want the card to be formatted, set the CONFIG_EXAMPLE_FORMAT_IF_MOUNT_FAILED menuconfig option.");
-                            } else {
-                                ESP_LOGE(TAG, "Failed to initialize the card (%s). "
-                                        "Make sure SD card lines have pull-up resistors in place.", esp_err_to_name(ret));
-                            }
-                            
-                        }
-                        
-
-
-
+                        card_reinitalization();
+    
                         FILE *f_gpx = fopen(gpx_file_path, "r+");
 
                         if (f_gpx == NULL)
@@ -655,8 +653,6 @@ static void UART_Task()
 
                     if (CD_status == 0)
                     {
-                        printf("No Card Detected\n");
-
                         CD_status_old = 0;
                     }
             
@@ -667,7 +663,6 @@ static void UART_Task()
             // Data is not valid
             else if (NMEA_data[1][2][0] == 'V')
             {
-                //printf("Invalid data\n");
                 gpio_set_level(GPS_STATUS_LED, 0);
                 char gpx_file_path[23]; 
                 strcpy(gpx_file_path, "\0");
@@ -676,15 +671,11 @@ static void UART_Task()
 
                 CD_status = gpio_get_level(7);
 
-                printf("CD_Status: %d CD_Status_Old: %d\n", CD_status, CD_status_old);
-
                 counter += 1;
 
                     
                 if (CD_status == 1 && CD_status_old == 1)
                 {
-                    printf("card connected\n");
-
                     FILE *f_gpx = fopen(gpx_file_path, "r+");
 
                     if (f_gpx == NULL)
@@ -703,37 +694,7 @@ static void UART_Task()
                 }
                 else if (CD_status == 1 && CD_status_old == 0)
                 {
-                    printf("card reconnected, reinitialising\n");
-                    
-                    esp_err_t ret;
-                    
-                    sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
-                    slot_config.gpio_cs = 4;
-                    slot_config.host_id = host.slot;
-                    
-                    esp_vfs_fat_sdcard_unmount(mount_point, card);
-
-                    //ESP_LOGI(TAG, "Mounting filesystem");
-                    printf("Mounting Filesystem");
-
-                    ret = esp_vfs_fat_sdspi_mount(mount_point, &host, &slot_config, &mount_config, &card);
-
-                    if (ret != ESP_OK) {
-                        if (ret == ESP_FAIL) {
-                            ESP_LOGE(TAG, "Failed to mount filesystem. "
-                                    "If you want the card to be formatted, set the CONFIG_EXAMPLE_FORMAT_IF_MOUNT_FAILED menuconfig option.");
-                        } else {
-                            ESP_LOGE(TAG, "Failed to initialize the card (%s). "
-                                    "Make sure SD card lines have pull-up resistors in place.", esp_err_to_name(ret));
-                        }
-                        return;
-                    }
-                    //ESP_LOGI(TAG, "Filesystem mounted");
-                    printf("Filesystem Mounted");
-
-                    //sdmmc_card_print_info(stdout, card);
-
-
+                    card_reinitalization();
 
                     FILE *f_gpx = fopen(gpx_file_path, "r+");
 
@@ -757,8 +718,6 @@ static void UART_Task()
 
                 if (CD_status == 0)
                 {
-                    printf("No Card Detected");
-
                     CD_status_old = 0;
                 }
                 
@@ -776,8 +735,7 @@ void app_main(void)
     GPIO_Setup();
 
     gpio_install_isr_service(0);
-
-    // Attach ISR handler
+    
     gpio_isr_handler_add(PIN_NUM_CD, gpio_isr_handler, (void*) PIN_NUM_CD);
     
     SD_Setup();
