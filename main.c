@@ -127,7 +127,12 @@ void SD_Setup(void)
         }
         return;
     }
-    ESP_LOGI(TAG, "Filesystem mounted");
+    else
+    {
+        card_inserted = true;
+        ESP_LOGI(TAG, "Filesystem mounted");
+    }
+    
 
     //sdmmc_card_print_info(stdout, card);
 
@@ -416,33 +421,33 @@ void UART_Setup()
 
 }
 
-static void UART_Task()
+static void GPS_Read_Write_Task()
 {
     int previous_point_time = 0;
 
     while (1)
     {
-
+        // If rising edge detection flag is true, sd card is either mounted or unmounted. 
         if (button_press == true)
         {
             if (card_inserted == false)
             {
                 card_reinitalization();
+                card_inserted = true;
             }
             else if (card_inserted == true)
             {
                 esp_vfs_fat_sdcard_unmount(mount_point, card);
                 CD_status = 0;
+                card_inserted = false;
             }
             
-            button_press = false;
-
+            // Delay after button press to ensure multiple triggers do not occur
             vTaskDelay(xDelay);
-            gpio_intr_enable(PIN_NUM_CD); 
+            gpio_intr_enable(PIN_NUM_CD);
+            button_press = false;
             printf("Button was pressed\n");
         }
-
-
 
 
         int len = uart_read_bytes(UART_NUM_1, GPS_data, BUF_SIZE, 5);
@@ -450,9 +455,6 @@ static void UART_Task()
         if (len>0 && card_inserted == true)
         { 
             GPS_data[len] = '\0';
-
-            //printf("%d\n", len);
-            //printf("\n%s", GPS_data);
 
             
             int j = 0;
@@ -545,10 +547,6 @@ static void UART_Task()
                 }
             }
 
-
-            // Check if SD card is present
-            //int level = gpio_get_level(gpio_num);
-
             // If data is valid
             if (NMEA_data[1][2][0] == 'A')
             {
@@ -569,7 +567,7 @@ static void UART_Task()
 
                 //printf("%f\n", HDOP);
 
-                if (HDOP <= 50)
+                if (HDOP <= 5)
                 {
                     // Latitude, Longitude, and Time are all converted to a different format. See functions for details
                     latitude = ConvertLatToDecimalDegrees(NMEA_data[1][3], NMEA_data[1][4]);
@@ -692,7 +690,7 @@ static void UART_Task()
             }
 
             // Data is not valid
-            else if (NMEA_data[1][2][0] == 'V' || gpio_get_level(7) == 0)
+            else if (NMEA_data[1][2][0] == 'V')
             {
                 vTaskDelay(50);
                 gpio_set_level(GPS_STATUS_LED, 0);
@@ -702,6 +700,12 @@ static void UART_Task()
                 CD_status = gpio_get_level(7); 
             }
             
+            else if (card_inserted == false)
+            {
+                gpio_set_level(GPS_STATUS_LED, 0);
+            }
+
+
             uart_flush(UART_NUM_1);   
         }     
     }
@@ -719,5 +723,5 @@ void app_main(void)
 
     UART_Setup();
     
-    UART_Task();
+    GPS_Read_Write_Task();
 }
