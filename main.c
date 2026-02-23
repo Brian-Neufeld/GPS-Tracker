@@ -45,6 +45,7 @@ bool card_inserted = false;
 bool button_press = false;
 int SDMMC_TIMEOUT_MS = 500;
 const TickType_t xDelay = 1000 / portTICK_PERIOD_MS;
+FILE *f_gpx = NULL;
 
 // Method to determine when to start a new tracking
 int max_time_difference = 2; // Maximum time between points in seconds
@@ -113,6 +114,10 @@ void SD_Setup(void)
         ESP_LOGE(TAG, "Failed to initialize bus.");
         return;
     }
+    else
+    {
+        printf("SPI bus initialized\n");
+    }
 
     ESP_LOGI(TAG, "Mounting filesystem");
     ret = esp_vfs_fat_sdspi_mount(mount_point, &host, &slot_config, &mount_config, &card);
@@ -140,15 +145,15 @@ void SD_Setup(void)
 
 }
 
-void generate_gpx_file(char* filename) {
+void generate_gpx_file(char *filename)
+{
+    printf("Generating file: %s\n", filename);
 
-    
     FILE *f_gpx = fopen(filename, "a+");
-    if (f_gpx == NULL) {
-        ESP_LOGE(TAG, "Failed to open file for writing");
 
-        
-        
+    if (f_gpx == NULL)
+    {
+        ESP_LOGE(TAG, "Failed to create or open file for writing");
     }
     else
     {
@@ -160,9 +165,9 @@ void generate_gpx_file(char* filename) {
         fprintf(f_gpx, "  </metadata>\n");
         fprintf(f_gpx, "</gpx>\n");
 
-        
-
         fclose(f_gpx);
+
+        printf("file generated\n");
     }
 }
 
@@ -284,6 +289,8 @@ void GPIO_Setup(void)
 
 void card_reinitalization()
 {
+    int attempts = 0;
+
     esp_err_t ret;
 
     sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
@@ -302,20 +309,25 @@ void card_reinitalization()
         esp_vfs_fat_sdcard_unmount(mount_point, card);
         
         ret = esp_vfs_fat_sdspi_mount(mount_point, &host, &slot_config, &mount_config, &card);
+        if (attempts > 10)
+        {
+            card_inserted = false;
+            printf("Card initialisation failed\n");
+            return;
+        }
+
+        attempts += 1;
     }
 
-    card_inserted = true;
+    if (attempts <= 10)
+    {
+        card_inserted = true;
 
-    /*if (ret != ESP_OK) {
-        if (ret == ESP_FAIL) {
-            ESP_LOGE(TAG, "Failed to mount filesystem. "
-                    "If you want the card to be formatted, set the CONFIG_EXAMPLE_FORMAT_IF_MOUNT_FAILED menuconfig option.");
-        } else {
-            ESP_LOGE(TAG, "Failed to initialize the card (%s). "
-                    "Make sure SD card lines have pull-up resistors in place.", esp_err_to_name(ret));
-        }
-        return;
-    }*/
+        sdmmc_card_print_info(stdout, card);
+
+        printf("Card initialisation succeeded\n");
+    }
+    
 }
 
 static const char *TAG2 = "GPIO_INT";
@@ -433,12 +445,12 @@ static void GPS_Read_Write_Task()
             if (card_inserted == false)
             {
                 card_reinitalization();
-                card_inserted = true;
             }
             else if (card_inserted == true)
             {
                 esp_vfs_fat_sdcard_unmount(mount_point, card);
                 CD_status = 0;
+                CD_status_old = 0;
                 card_inserted = false;
             }
             
@@ -465,6 +477,7 @@ static void GPS_Read_Write_Task()
 
             Sentence_Data[5] = '\0';
 
+            // GPS data is seperated into matrix
             for (size_t i = 0; i < len; i++)
             {
                 if(GPS_data[i] == '$' && GPS_data[i+1] == 'G')
@@ -567,7 +580,7 @@ static void GPS_Read_Write_Task()
 
                 //printf("%f\n", HDOP);
 
-                if (HDOP <= 5)
+                if (HDOP <= 2.5)
                 {
                     // Latitude, Longitude, and Time are all converted to a different format. See functions for details
                     latitude = ConvertLatToDecimalDegrees(NMEA_data[1][3], NMEA_data[1][4]);
@@ -583,100 +596,63 @@ static void GPS_Read_Write_Task()
                     strcat(gpx_file_path, NMEA_data[1][9]);
                     //printf("Date= %s\n", NMEA_data[1][9]);
                     strcat(gpx_file_path, ".gpx");
-
-                    CD_status = 1;
-
-                    //printf("CD_Status: %d CD_Status: %d\n", CD_status, CD_status_old);
-
-
-                    if (CD_status == 1 && CD_status_old == 1)
-                    {
                     
-                        FILE *f_gpx = fopen(gpx_file_path, "r+");
+                    f_gpx = fopen(gpx_file_path, "r+");
 
-                        printf(strerror(errno));
-                        printf("\n");
-                        
-                        if (errno == EIO)
-                        {
-                            card_reinitalization();
-                            FILE *f_gpx = fopen(gpx_file_path, "r+");
-                        }
-
-                        if (f_gpx == NULL)
-                        {
-                            generate_gpx_file(gpx_file_path);
-                            
-                        }
+                    //printf(strerror(errno));
+                    //printf("%s\n", gpx_file_path);
                     
-                        if((unix_time - previous_point_time) <= 2)
-                        {
-                            fseek(f_gpx, -24, SEEK_END);
-                            write_track_point(f_gpx, latitude, longitude, elevation, GPX_Time, HDOP);
-
-                            fprintf(f_gpx, "</trkseg>\n");
-                            fprintf(f_gpx, "</trk>\n");
-                            fprintf(f_gpx, "</gpx>\n");
-                        }
-                        else
-                        {
-                            fseek(f_gpx, -7, SEEK_END);
-                            begin_new_track(f_gpx, GPX_Time);
-
-                            fseek(f_gpx, -24, SEEK_END);
-                            write_track_point(f_gpx, latitude, longitude, elevation, GPX_Time, HDOP);
-
-                            fprintf(f_gpx, "</trkseg>\n");
-                            fprintf(f_gpx, "</trk>\n");
-                            fprintf(f_gpx, "</gpx>\n");
-                        }
-                        previous_point_time = unix_time;
-
-                        fclose(f_gpx);
-                        f_gpx = NULL;
-                    }
-                    else if (CD_status == 1 && CD_status_old == 0)
+                    if (errno == EIO)
                     {
+                        printf("I/O error\n");
                         card_reinitalization();
-    
-                        FILE *f_gpx = fopen(gpx_file_path, "r+");
-
-                        if (f_gpx == NULL)
-                        {
-                            generate_gpx_file(gpx_file_path);
-                        }
-                        else
-                        {
-                            if((unix_time - previous_point_time) <= 2)
-                            {
-                                fseek(f_gpx, -24, SEEK_END);
-                                write_track_point(f_gpx, latitude, longitude, elevation, GPX_Time, HDOP);
-
-                                fprintf(f_gpx, "</trkseg>\n");
-                                fprintf(f_gpx, "</trk>\n");
-                                fprintf(f_gpx, "</gpx>\n");
-                            }
-                            else
-                            {
-                                fseek(f_gpx, -7, SEEK_END);
-                                begin_new_track(f_gpx, GPX_Time);
-
-                                fseek(f_gpx, -24, SEEK_END);
-                                write_track_point(f_gpx, latitude, longitude, elevation, GPX_Time, HDOP);
-
-                                fprintf(f_gpx, "</trkseg>\n");
-                                fprintf(f_gpx, "</trk>\n");
-                                fprintf(f_gpx, "</gpx>\n");
-                            }
-                            previous_point_time = unix_time;
-                        }
-
-                        CD_status_old = 1;
+                        //f_gpx = fopen(gpx_file_path, "r+");
                     }
-                    if (CD_status == 0)
+                    /*else if (errno == ENOENT)
                     {
-                        CD_status_old = 0;
+                        fclose(f_gpx);
+                        printf("No such file or directory\n");
+                        generate_gpx_file(gpx_file_path);
+                        f_gpx = fopen(gpx_file_path, "r+");
+                    }*/
+
+                    if (f_gpx == NULL)
+                    {
+                        fclose(f_gpx);
+                        printf("No such file or directory\n");
+                        generate_gpx_file(gpx_file_path);
+                        f_gpx = fopen(gpx_file_path, "r+");
                     }
+                    
+                
+                    if((unix_time - previous_point_time) <= 2)
+                    {
+                        fseek(f_gpx, -24, SEEK_END);
+                        write_track_point(f_gpx, latitude, longitude, elevation, GPX_Time, HDOP);
+
+                        fprintf(f_gpx, "</trkseg>\n");
+                        fprintf(f_gpx, "</trk>\n");
+                        fprintf(f_gpx, "</gpx>\n");
+                    }
+                    else
+                    {
+                        fseek(f_gpx, -7, SEEK_END);
+                        begin_new_track(f_gpx, GPX_Time);
+
+                        fseek(f_gpx, -24, SEEK_END);
+                        write_track_point(f_gpx, latitude, longitude, elevation, GPX_Time, HDOP);
+
+                        fprintf(f_gpx, "</trkseg>\n");
+                        fprintf(f_gpx, "</trk>\n");
+                        fprintf(f_gpx, "</gpx>\n");
+                    }
+                    previous_point_time = unix_time;
+
+                    fclose(f_gpx);
+                    f_gpx = NULL;
+                    
+                    
+                    
             
 
                 }
@@ -700,14 +676,13 @@ static void GPS_Read_Write_Task()
                 CD_status = gpio_get_level(7); 
             }
             
-            else if (card_inserted == false)
-            {
-                gpio_set_level(GPS_STATUS_LED, 0);
-            }
-
-
             uart_flush(UART_NUM_1);   
         }     
+
+        else if (card_inserted == false)
+        {
+            gpio_set_level(GPS_STATUS_LED, 0);
+        }
     }
 }
 
