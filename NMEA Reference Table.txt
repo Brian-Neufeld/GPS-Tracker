@@ -1,0 +1,64 @@
++-----------+---------------+-------------------------+------------+------------------------+-------------------+--------------------+
+| NEMA DATA |    0:GPGLL    |         1:GPRMC         |  2:GPVTG   |        3:GPGGA         |      4:GPGSA      |      5:GPGSV       |
++-----------+---------------+-------------------------+------------+------------------------+-------------------+--------------------+
+|         0 | MESSAGE ID    | MESSAGE ID              | MESSAGE ID | MESSAGE ID             | MESSAGE ID        | MESSAGE ID         |
+|         1 | LATITUDE      | UTC TIME                | COURSE     | UTC TIME               | MODE 1            | NUMBER OF MESSAGES |
+|         2 | N/S INDICATOR | STATUS                  | REFERENCE  | N/S INDICATOR          | MODE 2            | MESSAGE NUMBER     |
+|         3 | LONGITUDE     | LATITUDE                | COURSE     | LONGITUDE              | SATELLITE USED 1  | SATELLITES IN VIEW |
+|         4 | E/W INDICATOR | N/S INDICATOR           | SPEED      | E/W INDICATOR          | SATELLITE USED 2  | SATELLITE ID       |
+|         5 | UTC TIME      | LONGITUDE               | UNITS      | POSITION FIX INDICATOR | ...               | ELEVATION          |
+|         6 | STATUS        | E/W INDICATOR           | SPEED      | SATELLITES USED        | SATELLITE USED 12 | AZIMUTH            |
+|         7 | MODE          | SPEED OVER GROUND       | UNITS      | HDOP                   | PDOP              | SNR                |
+|         8 |---------------| COURSE OVER GROUND      | MODE       | MSL ALTITUDE           | HDOP              | ...                |
+|         9 |---------------| DATE                    |------------| UNITS                  | VDOP              | SATELLITE ID       |
+|        10 |---------------| MAGNETIC VARIATION      |------------| GEOID SEPERATION       |-------------------| ELEVATION          |
+|        11 |---------------| MODE                    |------------| UNITS                  |-------------------| AZIMUTH            |
+|        12 |---------------|                         |------------| AGE OF DIFF. CORR.     |-------------------| SNR                |
+|        13 |---------------|                         |------------| DIFF. REF. STATION ID  |-------------------|--------------------|
+|        14 |---------------|                         |------------|                        |-------------------|--------------------|
+|        15 |---------------|                         |------------|                        |-------------------|--------------------|
++-----------+---------------+-------------------------+------------+------------------------+-------------------+--------------------+
+
+
+
+
+Sample GPX Track Format
+
+<?xml version="1.0" encoding="UTF-8"?>
+<gpx creator="ESP32_GPS_LOGGER">
+ <metadata>
+  <name>GPS Data</name>
+  <desc>A GPX file generated from EPS32 GPS tracker</desc>
+ </metadata>
+ <trk>
+  <type>hiking</type>
+  <trkseg>
+   <trkpt lat="43.6840120" lon="-79.9719960">
+    <ele>325.8</ele>
+    <time>2023-11-11T18:19:51Z</time>
+   </trkpt>
+   <trkpt lat="43.6836840" lon="-79.9719090">
+    <ele>322.2</ele>
+    <time>2023-11-11T20:29:02Z</time>
+   </trkpt>
+  </trkseg>
+ </trk>
+</gpx>
+
+Sample GPX Waypoint Format
+
+<?xml version="1.0" encoding="UTF-8"?>
+<gpx creator="ESP32_GPS_LOGGER">
+ <metadata>
+  <name>GPS Data</name>
+  <desc>A GPX file generated from EPS32 GPS tracker</desc>
+ </metadata>
+ <wpt lat="43.6840120" lon="-79.9719960">
+  <ele>325.8</ele>
+  <time>2023-11-11T18:19:51Z</time>
+ </wpt>
+  <wpt lat="43.6836840" lon="-79.9719090">
+  <ele>322.2</ele>
+  <time>2023-11-11T20:29:02Z</time>
+ </wpt>
+</gpx>
