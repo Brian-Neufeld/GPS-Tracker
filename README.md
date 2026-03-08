@@ -1,3 +1,3 @@
 # GPS-Tracker
 
-SD card insertion and removal is controlled by a pushbutton tied to GPIO 7. 
+SD card insertion and ejection is controlled by a momentary pushbutton tied to GPIO 7. 
