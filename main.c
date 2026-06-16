@@ -33,6 +33,7 @@
 #define EXAMPLE_MAX_CHAR_SIZE    2048
 #define MAX_PATH 32
 
+char error_msg[100];
 char GPS_data[2048];
 char data[EXAMPLE_MAX_CHAR_SIZE];
 char GPS_output[EXAMPLE_MAX_CHAR_SIZE];
@@ -47,6 +48,7 @@ bool button_press = false;
 int SDMMC_TIMEOUT_MS = 500;
 const TickType_t xDelay = 1000 / portTICK_PERIOD_MS;
 FILE *f_gpx = NULL;
+FILE *f_error = NULL;
 
 // Method to determine when to start a new tracking
 int max_time_difference = 2; // Maximum time between points in seconds
@@ -100,6 +102,16 @@ spi_bus_config_t bus_cfg = {
     .max_transfer_sz = 4000,
 };
 
+void Write_Error(char *error_msg)
+{
+    char error_file_path[18] = "/sdcard/ERROR.txt\0"; 
+                    
+    f_error = fopen(error_file_path, "a+");
+
+    fprintf(f_error, error_msg);
+
+    fclose(f_error);
+}
 
 void SD_Setup(void)
 {
@@ -355,7 +367,7 @@ void UART_Setup()
     uart_set_pin(UART_NUM_1, 2, 3, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
 
 
-    char* GPS_baud_rate_command = "$PMTK251,19200*22\r\n";
+    char* GPS_baud_rate_command = "$PMTK251,115200*1F\r\n";
 
     
     uart_set_baudrate(UART_NUM_1, 9600);
@@ -366,7 +378,7 @@ void UART_Setup()
 
     uart_wait_tx_done(UART_NUM_1, 100);
 
-    uart_set_baudrate(UART_NUM_1, 19200);
+    uart_set_baudrate(UART_NUM_1, 115200);
 
     
 
@@ -406,7 +418,7 @@ void UART_Setup()
     uart_flush_input(UART_NUM_1);
 
 
-    uart_write_bytes(UART_NUM_1, (const char*)GPS_rate_command_fast, 20);
+    uart_write_bytes(UART_NUM_1, (const char*)GPS_rate_command_fast, strlen(GPS_rate_command_fast));
     uart_wait_tx_done(UART_NUM_1, 100);
 
     uart_read_bytes(UART_NUM_1, GPS_data, BUF_SIZE, 5);
@@ -468,6 +480,8 @@ static void GPS_Read_Write_Task()
         if (len>0 && card_inserted == true)
         { 
             GPS_data[len] = '\0';
+
+            //printf(GPS_data);
 
             
             int j = 0;
@@ -564,9 +578,7 @@ static void GPS_Read_Write_Task()
             // If data is valid
             if (NMEA_data[1][2][0] == 'A')
             {
-                gpio_set_level(GPS_STATUS_LED, 1);
-
-
+                
                 float latitude;
                 float longitude;
                 char GPX_Time[30];
@@ -576,6 +588,11 @@ static void GPS_Read_Write_Task()
                 float elevation = MSL;
                 float HDOP = atof(NMEA_data[3][8]);
                 float speed = 0;
+                int num_of_sat = atoi(NMEA_data[3][7]);
+
+                //printf("%d\n",num_of_sat);
+                //printf("%f\n",HDOP);
+                //printf("%c\n\n",NMEA_data[1][2][0]);
 
                 latitude = 0;
                 longitude = 0;
@@ -584,87 +601,99 @@ static void GPS_Read_Write_Task()
 
                 if (HDOP <= 2.5)
                 {
-                    // Latitude, Longitude, and Time are all converted to a different format. See functions for details
-                    latitude = ConvertLatToDecimalDegrees(NMEA_data[1][3], NMEA_data[1][4]);
-                    longitude = ConvertLongToDecimalDegrees(NMEA_data[1][5], NMEA_data[1][6]);
-                    ConvertDateandTimeFormat(NMEA_data[1][9], NMEA_data[1][1], GPX_Time, &unix_time);
+                    gpio_set_level(GPS_STATUS_LED, 1);
 
-                    speed = atof(NMEA_data[1][7]);
-
-                    //printf("Lat = %f, Long = %f, Time = %s\n", latitude, longitude, GPX_Time);
-                    
-                    char gpx_file_path[26]; 
-                    strcpy(gpx_file_path, "\0");
-
-                    strcat(gpx_file_path, "/sdcard/DATA_");
-                    strcat(gpx_file_path, NMEA_data[1][9]);
-                    strcat(gpx_file_path, ".gpx");
-                    
-                    f_gpx = fopen(gpx_file_path, "r+");
-
-                    
-                    if (errno == EIO)
-                    {
-                        printf("I/O error\n");
-                        card_reinitalization();
-                    }
-
-                    if (f_gpx == NULL)
-                    {
-                        fclose(f_gpx);
-                        printf("No such file or directory\n");
-                        generate_gpx_file(gpx_file_path);
-                        f_gpx = fopen(gpx_file_path, "r+");
-
-                        if (date_old != NMEA_data[1][9])
-                        {
-                            fseek(f_gpx, -7, SEEK_END);
-                            begin_new_track(f_gpx, GPX_Time);
-                        }
-
-                    }
-                    
-                
-                    if((unix_time - previous_point_time) <= 2)
-                    {
-                        fseek(f_gpx, -27, SEEK_END);
-                        write_track_point(f_gpx, latitude, longitude, elevation, GPX_Time, unix_time, HDOP, speed);
-
-                        fprintf(f_gpx, "   </trkseg>\n");
-                        fprintf(f_gpx, " </trk>\n");
-                        fprintf(f_gpx, "</gpx>\n");
-                    }
-                    else
-                    {
-                        fseek(f_gpx, -7, SEEK_END);
-                        begin_new_track(f_gpx, GPX_Time);
-
-                        fseek(f_gpx, -27, SEEK_END);
-                        write_track_point(f_gpx, latitude, longitude, elevation, GPX_Time, unix_time, HDOP, speed);
-
-                        fprintf(f_gpx, "   </trkseg>\n");
-                        fprintf(f_gpx, " </trk>\n");
-                        fprintf(f_gpx, "</gpx>\n");
-                    }
-                    previous_point_time = unix_time;
-                    strcpy(date_old, NMEA_data[1][9]);
-
-                    fclose(f_gpx);
-                    f_gpx = NULL;
-                    
                 }
                 else
                 {
+                    //Write_Error("HDOP > 2.5\0");
                     vTaskDelay(50);
                     gpio_set_level(GPS_STATUS_LED, 0);
                     vTaskDelay(50);
                     gpio_set_level(GPS_STATUS_LED, 1);
                 }
+
+                // Latitude, Longitude, and Time are all converted to a different format. See functions for details
+                latitude = ConvertLatToDecimalDegrees(NMEA_data[1][3], NMEA_data[1][4]);
+                longitude = ConvertLongToDecimalDegrees(NMEA_data[1][5], NMEA_data[1][6]);
+                ConvertDateandTimeFormat(NMEA_data[1][9], NMEA_data[1][1], GPX_Time, &unix_time);
+
+                speed = atof(NMEA_data[1][7]);
+
+                printf("Lat = %f, Long = %f, Time = %s, Num. of Sats. = %d\n", latitude, longitude, GPX_Time, num_of_sat);
+                
+                char gpx_file_path[26]; 
+                strcpy(gpx_file_path, "\0");
+
+                strcat(gpx_file_path, "/sdcard/DATA_");
+                strcat(gpx_file_path, NMEA_data[1][9]);
+                strcat(gpx_file_path, ".gpx");
+                
+                f_gpx = fopen(gpx_file_path, "r+");
+
+                
+                if (errno == EIO)
+                {
+                    printf("I/O error\n");
+                    card_reinitalization();
+                }
+
+                if (f_gpx == NULL)
+                {
+                    fclose(f_gpx);
+                    printf("No such file or directory\n");
+                    generate_gpx_file(gpx_file_path);
+                    f_gpx = fopen(gpx_file_path, "r+");
+
+                    if (date_old != NMEA_data[1][9])
+                    {
+                        fseek(f_gpx, -7, SEEK_END);
+                        begin_new_track(f_gpx, GPX_Time);
+                    }
+
+                }
+                
+            
+                if((unix_time - previous_point_time) <= 2)
+                {
+                    fseek(f_gpx, -27, SEEK_END);
+                    write_track_point(f_gpx, latitude, longitude, elevation, GPX_Time, unix_time, HDOP, speed);
+
+                    fprintf(f_gpx, "   </trkseg>\n");
+                    fprintf(f_gpx, " </trk>\n");
+                    fprintf(f_gpx, "</gpx>\n");
+                }
+                else
+                {
+                    fseek(f_gpx, -7, SEEK_END);
+                    begin_new_track(f_gpx, GPX_Time);
+
+                    fseek(f_gpx, -27, SEEK_END);
+                    write_track_point(f_gpx, latitude, longitude, elevation, GPX_Time, unix_time, HDOP, speed);
+
+                    fprintf(f_gpx, "   </trkseg>\n");
+                    fprintf(f_gpx, " </trk>\n");
+                    fprintf(f_gpx, "</gpx>\n");
+                }
+                previous_point_time = unix_time;
+                strcpy(date_old, NMEA_data[1][9]);
+
+                fclose(f_gpx);
+                f_gpx = NULL;
+                            
             }
 
             // Data is not valid
             else if (NMEA_data[1][2][0] == 'V')
             {
+
+                int num_of_sat = atoi(NMEA_data[3][7]);
+                char GPX_Time[30];
+                int unix_time;
+
+                ConvertDateandTimeFormat(NMEA_data[1][9], NMEA_data[1][1], GPX_Time, &unix_time);
+                printf("Time = %s, Number of satellites = %d\n", GPX_Time, num_of_sat);
+                
                 vTaskDelay(50);
                 gpio_set_level(GPS_STATUS_LED, 0);
                 vTaskDelay(50);
