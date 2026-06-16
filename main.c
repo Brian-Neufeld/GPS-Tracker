@@ -53,6 +53,7 @@ FILE *f_error = NULL;
 // Method to determine when to start a new tracking
 int max_time_difference = 2; // Maximum time between points in seconds
 
+// UART configuration for GPS module
 uart_config_t uart_config = 
 {
     .baud_rate = 9600,
@@ -67,6 +68,7 @@ static const char *TAG = "example";
 
 #define MOUNT_POINT "/sdcard"
 
+// Define the pins for SPI communication with SD card
 #define PIN_NUM_MISO  9
 #define PIN_NUM_MOSI  10
 #define PIN_NUM_CLK   8
@@ -102,17 +104,104 @@ spi_bus_config_t bus_cfg = {
     .max_transfer_sz = 4000,
 };
 
+// Validates checksum for NMEA data
+int nmea0183_checksum(char *nmea_data)
+{
+    int crc = 0;
+    int i;
+    
+    for (i = 1; i < strlen(nmea_data)-5; i ++) {
+        crc ^= nmea_data[i];
+    }
+
+    return crc;
+}
+
+// Convert integer to hex string, might be removable
+void intToHexString(int num, char *hexStr) 
+{
+    sprintf(hexStr, "%x", num);  
+}
+
+// Converts a laitude in the format degrees, minutes, decimal minutes to the decimal degree format 
+float ConvertLatToDecimalDegrees(const char* LatStr, const char* LatDirection)
+{
+    int degrees, minutes;
+    float decimalMinutes;
+    float decimalLatitude;
+
+    sscanf(LatStr, "%2d%2d.%4f", &degrees, &minutes, &decimalMinutes);
+
+    if (LatDirection[0] == 'S')
+    {
+        decimalLatitude = -1 * (degrees + (minutes + decimalMinutes / 10000) / 60.0);
+    }
+    else
+    {
+        decimalLatitude = degrees + (minutes + decimalMinutes / 10000) / 60.0;
+    }
+
+    return decimalLatitude;
+}
+
+// Converts a longitude in the format degrees, minutes, decimal minutes to the decimal degree format 
+float ConvertLongToDecimalDegrees(const char* LongStr, const char* LongDirection)
+{
+    int degrees, minutes;
+    float decimalMinutes;
+    float decimalLongitude;
+
+    sscanf(LongStr, "%3d%2d.%4f", &degrees, &minutes, &decimalMinutes);
+
+
+    if (LongDirection[0] == 'W')
+    {
+        decimalLongitude = -1 * (degrees + (minutes + decimalMinutes / 10000) / 60.0);
+    }
+    else
+    {
+        decimalLongitude = degrees + (minutes + decimalMinutes / 10000) / 60.0;
+    }
+
+    return decimalLongitude;
+}
+
+// Converts datetime output of GPS to GPX format: YYYY-MM-DDTHH:MM:SS.SSSZ
+void ConvertDateandTimeFormat(const char* DateStr, const char* TimeStr, char* result_gpx, int *unix_time)
+{
+    int year, month, day, hour, minute; 
+    float second;
+
+    sscanf(DateStr, "%2d%2d%2d", &day, &month, &year);
+    sscanf(TimeStr, "%2d%2d%6f", &hour, &minute, &second);
+
+    struct tm time;
+    
+    time.tm_year = year + 100;
+    time.tm_mon = month - 1;
+    time.tm_mday = day;
+    time.tm_hour = hour;
+    time.tm_min = minute;
+    time.tm_sec = floor(second);
+    
+
+    *unix_time = mktime(&time);
+
+    sprintf(result_gpx, "20%02d-%02d-%02dT%02d:%02d:%06.3fZ", year, month, day, hour, minute, second);
+
+    //sprintf(unix_time, "20%02d%02d%02d%02d%02d%06.3f", year, month, day, hour, minute, second); 
+}
+
+// If an error occurs, this function can write an error message to a text file on the SD card
 void Write_Error(char *error_msg)
 {
-    char error_file_path[18] = "/sdcard/ERROR.txt\0"; 
-                    
+    char error_file_path[18] = "/sdcard/ERROR.txt\0";                   
     f_error = fopen(error_file_path, "a+");
-
     fprintf(f_error, error_msg);
-
     fclose(f_error);
 }
 
+// Initalizes SD card and checks if it is valid
 void SD_Setup(void)
 {
     esp_err_t ret;
@@ -158,6 +247,7 @@ void SD_Setup(void)
 
 }
 
+// Generates a new GPX file based on a provided filename if one does not exist
 void generate_gpx_file(char *filename)
 {
     printf("Generating file: %s\n", filename);
@@ -184,6 +274,7 @@ void generate_gpx_file(char *filename)
     }
 }
 
+// Writes a GPX waypoint to GPX file. Contains latitude, longitude, elevation, and the current date and time.
 void write_waypoint(FILE *file, float lat, float lon, float ele, const char* time) {
     fprintf(file, "  <wpt lat=\"%.6f\" lon=\"%.6f\">\n", lat, lon);
     fprintf(file, "    <ele>%f</ele>\n", ele);
@@ -205,88 +296,7 @@ void write_track_point(FILE *file, float lat, float lon, float ele, const char* 
     fprintf(file, "    <trkpt lat=\"%.6f\" lon=\"%.6f\"><ele>%f</ele><time>%s</time></trkpt><UNIX_TIME>%d</UNIX_TIME><HDOP>%f</HDOP><speed>%f</speed>\n", lat, lon, ele, time, unix_time, HDOP, speed);
 }
 
-int nmea0183_checksum(char *nmea_data)
-{
-    int crc = 0;
-    int i;
-    
-    for (i = 1; i < strlen(nmea_data)-5; i ++) {
-        crc ^= nmea_data[i];
-    }
 
-    return crc;
-}
-
-void intToHexString(int num, char *hexStr) 
-{
-    sprintf(hexStr, "%x", num);  // Convert integer to hex string
-}
-
-float ConvertLatToDecimalDegrees(const char* LatStr, const char* LatDirection)
-{
-    int degrees, minutes;
-    float decimalMinutes;
-    float decimalLatitude;
-
-    sscanf(LatStr, "%2d%2d.%4f", &degrees, &minutes, &decimalMinutes);
-
-    if (LatDirection[0] == 'S')
-    {
-        decimalLatitude = -1 * (degrees + (minutes + decimalMinutes / 10000) / 60.0);
-    }
-    else
-    {
-        decimalLatitude = degrees + (minutes + decimalMinutes / 10000) / 60.0;
-    }
-
-    return decimalLatitude;
-}
-
-float ConvertLongToDecimalDegrees(const char* LongStr, const char* LongDirection)
-{
-    int degrees, minutes;
-    float decimalMinutes;
-    float decimalLongitude;
-
-    sscanf(LongStr, "%3d%2d.%4f", &degrees, &minutes, &decimalMinutes);
-
-
-    if (LongDirection[0] == 'W')
-    {
-        decimalLongitude = -1 * (degrees + (minutes + decimalMinutes / 10000) / 60.0);
-    }
-    else
-    {
-        decimalLongitude = degrees + (minutes + decimalMinutes / 10000) / 60.0;
-    }
-
-    return decimalLongitude;
-}
-
-void ConvertDateandTimeFormat(const char* DateStr, const char* TimeStr, char* result_gpx, int *unix_time)
-{
-    int year, month, day, hour, minute; 
-    float second;
-
-    sscanf(DateStr, "%2d%2d%2d", &day, &month, &year);
-    sscanf(TimeStr, "%2d%2d%6f", &hour, &minute, &second);
-
-    struct tm time;
-    
-    time.tm_year = year + 100;
-    time.tm_mon = month - 1;
-    time.tm_mday = day;
-    time.tm_hour = hour;
-    time.tm_min = minute;
-    time.tm_sec = floor(second);
-    
-
-    *unix_time = mktime(&time);
-
-    sprintf(result_gpx, "20%02d-%02d-%02dT%02d:%02d:%06.3fZ", year, month, day, hour, minute, second);
-
-    //sprintf(unix_time, "20%02d%02d%02d%02d%02d%06.3f", year, month, day, hour, minute, second); 
-}
 
 void GPIO_Setup(void)
 {
@@ -606,7 +616,7 @@ static void GPS_Read_Write_Task()
                 }
                 else
                 {
-                    //Write_Error("HDOP > 2.5\0");
+                    Write_Error("HDOP > 2.5\0");
                     vTaskDelay(50);
                     gpio_set_level(GPS_STATUS_LED, 0);
                     vTaskDelay(50);
