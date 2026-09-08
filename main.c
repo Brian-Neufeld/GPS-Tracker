@@ -353,33 +353,50 @@ void card_reinitalization()
 
 void GPX_file_error_correction(char *filename)
 {
+    char filenamenew[256];
+
     FILE *f_gpx = fopen(filename, "r+");
 
     char gpx_char[128];
 
     if (f_gpx == NULL)
     {
-        ESP_LOGE(TAG, "Failed to create or open file for writing");
+        printf("Failed to create or open file for writing\n");
+
+        fclose(f_gpx);
     }
     else
     {
         fseek(f_gpx,-7,SEEK_END);
 
-        fread(gpx_char, sizeof(char), 6, f_gpx);
+        fread(gpx_char, sizeof(char), 7, f_gpx);
 
-        if (strncmp(gpx_char, "</gpx>", 6) == 0)
+        gpx_char[7] = '\0';
+
+        //printf("{%s}\n", gpx_char);
+
+        if (strncmp(gpx_char, "</gpx>\n", 7) == 0)
         {
-            printf("file ok\n");
+            //printf("file ok\n");
+            fclose(f_gpx);
         }
         else
         {
             printf("file not ok\n");
 
-            int x = 8;
+            int x = 7;
 
-            //fseek(f_gpx,0,SEEK_END);
+            fseek(f_gpx, -x, SEEK_END);
 
-            while (x != 256)   //strncmp(gpx_char, "</speed>", 8) != 0)
+            fread(gpx_char, sizeof(char), 7, f_gpx);
+
+            gpx_char[7] = '\0';
+
+            //printf("{%s}\n", gpx_char);
+
+            x = 9;
+
+            while (x < 256)
             {
 
                 fseek(f_gpx, -x, SEEK_END);
@@ -387,42 +404,65 @@ void GPX_file_error_correction(char *filename)
                 fread(gpx_char, sizeof(char), 8, f_gpx);
 
                 gpx_char[8] = '\0';
-                
-                //strcat(gpx_char, "\0");
-
-                //char *pos;
-                //if ((pos = strchr(gpx_char, '\n')) != NULL) {
-                //    *pos = ' ';
-                //}
-
-                //printf("Line:%s\n", gpx_char);
 
                 if (strncmp(gpx_char, "</speed>", 8) == 0)
                 {
-                    //printf("file ends at track point\n");
+                    //printf("{%s}\n", gpx_char);
 
-                    fseek(f_gpx, -x+9, SEEK_CUR);
+                    //printf("%d\n", strlen(gpx_char));
+
+                    fseek(f_gpx, -x+8, SEEK_END);
+
+                    fprintf(f_gpx,"\n  </trkseg>\n </trk>\n</gpx>\n");
 
                     x = 255;
-
-                    fprintf(f_gpx, "\n");
-                    fprintf(f_gpx, "   </trkseg>\n");
-                    fprintf(f_gpx, " </trk>\n");
-                    fprintf(f_gpx, "</gpx>\n");
                 }
                 x += 1;
         
+
             }
+
+            fseek(f_gpx, 0, SEEK_SET);
+
+            int filename_length = strlen(filename) - 4;
+
+            strncpy(filenamenew, filename, filename_length);
+
+            filenamenew[filename_length] = '\0';
+
+            strcat(filenamenew, "-new.gpx");
+
+            printf("%s\n", filenamenew);
+
+            FILE *f_gpx_new = fopen(filenamenew, "a+");
+
+            char buffer[512];
+
+            while (fgets(buffer, sizeof(buffer), f_gpx) != NULL) {
+
+                if (strncmp(buffer, "</gpx>\n", 7) == 0)
+                {
+                    fputs("</gpx>\n", f_gpx_new);
+                    break;
+                }
+                else
+                {
+                    fputs(buffer, f_gpx_new);
+                }
+            }
+
+            fclose(f_gpx_new);
+
+            fclose(f_gpx);
+
+            remove(filename);
+
+            rename(filenamenew, filename);
 
         }
 
-        //printf("%s\n", gpx_char);
-
-        //fprintf(stderr, "I/O Error: %s\n", strerror(errno));
-
     }
 
-    fclose(f_gpx);
 }
 
 static const char *TAG2 = "GPIO_INT";
@@ -683,7 +723,10 @@ static void GPS_Read_Write_Task()
 
                 //printf("%f\n", HDOP);
 
-                if (HDOP <= 2.5)
+                printf("Time = %s, Number of satellites = %d, HDOP = %f\n", GPX_Time, num_of_sat, HDOP);
+                
+                // Filters valid data by precision
+                if (HDOP <= 5)
                 {
                     gpio_set_level(GPS_STATUS_LED, 1);
 
@@ -711,6 +754,8 @@ static void GPS_Read_Write_Task()
 
                 //printf("Lat = %f, Long = %f, Time = %s, Num. of Sats. = %d\n", latitude, longitude, GPX_Time, num_of_sat);
                 
+
+                // File path is /sdcard/DATA_DDMMYY
                 char gpx_file_path[26]; 
                 strcpy(gpx_file_path, "\0");
 
@@ -718,17 +763,14 @@ static void GPS_Read_Write_Task()
                 strcat(gpx_file_path, NMEA_data[1][9]);
                 strcat(gpx_file_path, ".gpx");
 
-                
-                
+                if (access(gpx_file_path, F_OK) == 0)
+                {
+                    //printf("File exists.\n");
+
+                    GPX_file_error_correction(gpx_file_path);
+                }
+
                 f_gpx = fopen(gpx_file_path, "r+");
-
-                //char line[256];
-
-                //fseek(f_gpx,-80,SEEK_END);
-        
-                //fgets(line, sizeof(line), f_gpx);
-
-                //printf("%s\n", line);
 
                 
                 if (errno == EIO)
@@ -748,6 +790,7 @@ static void GPS_Read_Write_Task()
                     {
                         fseek(f_gpx, -7, SEEK_END);
                         begin_new_track(f_gpx, GPX_Time);
+                        previous_point_time = unix_time;
                     }
 
                 }
@@ -791,7 +834,7 @@ static void GPS_Read_Write_Task()
                 int unix_time;
 
                 ConvertDateandTimeFormat(NMEA_data[1][9], NMEA_data[1][1], GPX_Time, &unix_time);
-                //printf("Time = %s, Number of satellites = %d\n", GPX_Time, num_of_sat);
+                printf("Time = %s, Number of satellites = %d\n", GPX_Time, num_of_sat);
                 
                 vTaskDelay(50);
                 gpio_set_level(GPS_STATUS_LED, 0);
@@ -813,8 +856,6 @@ static void GPS_Read_Write_Task()
 
 void app_main(void)
 {
-    GPX_file_error_correction("c:Users/Brian/desktop/DATA_test_bad.gpx");
-
     GPIO_Setup();
 
     gpio_install_isr_service(0);
@@ -824,8 +865,6 @@ void app_main(void)
     SD_Setup();
 
     UART_Setup();
-
-    
-    
+ 
     GPS_Read_Write_Task();
 }
