@@ -11,6 +11,7 @@
 #include <time.h>
 #include <math.h>
 #include <errno.h>
+#include <dirent.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/uart.h"
@@ -26,13 +27,22 @@
 #include "driver/spi_common.h"
 #include "driver/gpio.h"
 
-
+#include "esp_wifi.h"
+#include "esp_netif.h"
+#include "esp_wifi_netif.h"
+#include "esp_event.h"
+#include "esp_log.h"
+#include "nvs_flash.h"
+#include "lwip/err.h"
+#include "lwip/sockets.h"
+#include "esp_err.h"
 
 #define GPS_STATUS_LED GPIO_NUM_6
 #define BUF_SIZE (1024*8)
 #define EXAMPLE_MAX_CHAR_SIZE    2048
 #define MAX_PATH 32
 
+char filename[100];
 char error_msg[100];
 char GPS_data[2048];
 char data[EXAMPLE_MAX_CHAR_SIZE];
@@ -74,6 +84,394 @@ static const char *TAG = "example";
 #define PIN_NUM_CLK   8
 #define PIN_NUM_CS    4
 #define PIN_NUM_CD    7
+
+// initalizes wifi stuff
+#define WIFI_SSID     "1209-2.4"
+#define WIFI_PASSWORD "103ducks"
+
+#define SERVER_IP   "10.0.0.15"
+#define SERVER_PORT 5000
+
+static EventGroupHandle_t wifi_event_group;
+
+#define WIFI_CONNECTED_BIT BIT0
+#define WIFI_FAIL_BIT      BIT1
+
+static int retry_count = 0;
+#define MAX_RETRY 5
+
+
+static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
+{
+    if (event_base == WIFI_EVENT &&
+        event_id == WIFI_EVENT_STA_START) {
+
+        ESP_LOGI(TAG, "Wi-Fi started");
+        esp_wifi_connect();
+
+    } else if (event_base == WIFI_EVENT &&
+               event_id == WIFI_EVENT_STA_DISCONNECTED) {
+
+        if (retry_count < MAX_RETRY) {
+            retry_count++;
+            ESP_LOGI(TAG, "Retrying Wi-Fi...");
+            esp_wifi_connect();
+        } else {
+            xEventGroupSetBits(wifi_event_group, WIFI_FAIL_BIT);
+        }
+
+    } else if (event_base == IP_EVENT &&
+               event_id == IP_EVENT_STA_GOT_IP) {
+
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+
+        ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
+
+        retry_count = 0;
+        xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
+    }
+}
+
+
+static void wifi_init_sta(void)
+{
+    wifi_event_group = xEventGroupCreate();
+
+    // Initialize TCP/IP network interface
+    ESP_ERROR_CHECK(esp_netif_init());
+
+    // Create default event loop
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    // Create default Wi-Fi station interface
+    esp_netif_create_default_wifi_sta();
+
+    // Initialize Wi-Fi
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    // Register Wi-Fi events
+    ESP_ERROR_CHECK(
+        esp_event_handler_register(
+            WIFI_EVENT,
+            ESP_EVENT_ANY_ID,
+            &wifi_event_handler,
+            NULL));
+
+    ESP_ERROR_CHECK(
+        esp_event_handler_register(
+            IP_EVENT,
+            IP_EVENT_STA_GOT_IP,
+            &wifi_event_handler,
+            NULL));
+
+    // Wi-Fi configuration
+    wifi_config_t wifi_config = {
+        .sta = {
+            .ssid = WIFI_SSID,
+            .password = WIFI_PASSWORD,
+            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+        },
+    };
+
+    ESP_ERROR_CHECK(
+        esp_wifi_set_mode(WIFI_MODE_STA));
+
+    ESP_ERROR_CHECK(
+        esp_wifi_set_config(
+            WIFI_IF_STA,
+            &wifi_config));
+
+    ESP_ERROR_CHECK(
+        esp_wifi_start());
+
+    ESP_LOGI(TAG, "Wi-Fi initialization complete");
+
+    // Wait for connection
+    EventBits_t bits = xEventGroupWaitBits(
+        wifi_event_group,
+        WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+        pdFALSE,
+        pdFALSE,
+        portMAX_DELAY
+    );
+
+    if (bits & WIFI_CONNECTED_BIT) {
+        ESP_LOGI(TAG, "Connected to Wi-Fi");
+    } else if (bits & WIFI_FAIL_BIT) {
+        ESP_LOGE(TAG, "Failed to connect to Wi-Fi");
+    }
+}
+
+
+void tcp_client_task(void *pvParameters)
+{
+    char rx_buffer[128];
+
+    
+
+    while (1) {
+
+        ESP_LOGI(TAG, "Creating socket...");
+
+        int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+
+        if (sock < 0) {
+            ESP_LOGE(TAG, "Unable to create socket");
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+
+        struct sockaddr_in dest_addr = {
+            .sin_family = AF_INET,
+            .sin_port = htons(SERVER_PORT),
+            .sin_addr.s_addr = inet_addr(SERVER_IP)
+        };
+
+        ESP_LOGI(TAG, "Connecting to %s:%d",
+                 SERVER_IP, SERVER_PORT);
+
+        int err = connect(
+            sock,
+            (struct sockaddr *)&dest_addr,
+            sizeof(dest_addr)
+        );
+
+        if (err != 0) {
+            ESP_LOGE(TAG, "Connection failed: errno %d", errno);
+            close(sock);
+
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+
+        ESP_LOGI(TAG, "Connected!");
+
+        // Send data
+        const char *message = "lat long etc\n";
+
+        int sent = send(
+            sock,
+            message,
+            strlen(message),
+            0
+        );
+
+        if (sent < 0) {
+            ESP_LOGE(TAG, "Send failed");
+            close(sock);
+
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+
+        ESP_LOGI(TAG, "Sent: %s", message);
+
+        // Receive response
+        int len = recv(
+            sock,
+            rx_buffer,
+            sizeof(rx_buffer) - 1,
+            0
+        );
+
+        if (len > 0) {
+            rx_buffer[len] = '\0';
+
+            ESP_LOGI(TAG, "Received: %s", rx_buffer);
+        } else if (len == 0) {
+            ESP_LOGI(TAG, "Server closed connection");
+        } else {
+            ESP_LOGE(TAG, "Receive failed");
+        }
+
+        // Close connection
+        shutdown(sock, 0);
+        close(sock);
+
+        ESP_LOGI(TAG, "Socket closed");
+
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+void backup_gpx_files(void)
+{
+    char rx_buffer[128];
+
+    ESP_LOGI(TAG, "Creating socket...");
+
+    int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+
+    if (sock < 0) {
+        ESP_LOGE(TAG, "Unable to create socket");
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        
+    }
+
+    struct sockaddr_in dest_addr = {
+        .sin_family = AF_INET,
+        .sin_port = htons(SERVER_PORT),
+        .sin_addr.s_addr = inet_addr(SERVER_IP)
+    };
+
+    ESP_LOGI(TAG, "Connecting to %s:%d",
+            SERVER_IP, SERVER_PORT);
+
+    int err = connect(
+        sock,
+        (struct sockaddr *)&dest_addr,
+        sizeof(dest_addr)
+    );
+
+    if (err != 0) {
+        ESP_LOGE(TAG, "Connection failed: errno %d", errno);
+        close(sock);
+
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        
+    }
+
+    ESP_LOGI(TAG, "Connected!");
+
+
+    struct dirent *entry;
+    
+    DIR *dir = opendir("/sdcard"); 
+
+    if (dir == NULL) {
+        printf("Could not open directory.\n"); 
+    }
+
+    // Loop through and print all file and folder names
+    while ((entry = readdir(dir)) != NULL) {
+        strcpy(filename, entry->d_name);
+
+        if (strncmp(filename, "DATA", 4) == 0)
+        {  
+            // Send data
+            //const char *message = "lat long etc\n";
+            int sent = send(
+                sock,
+                filename,
+                strlen(filename),
+                0
+            );
+
+            if (sent < 0) {
+                ESP_LOGE(TAG, "Send failed");
+                close(sock);
+
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                
+            }  
+        }   
+    }
+
+    closedir(dir);
+
+
+
+
+
+
+
+
+
+
+
+    
+
+    
+
+    // Receive response
+    int len = recv(
+        sock,
+        rx_buffer,
+        sizeof(rx_buffer) - 1,
+        0
+    );
+
+    if (len > 0) {
+        rx_buffer[len] = '\0';
+
+        ESP_LOGI(TAG, "Received: %s", rx_buffer);
+    } else if (len == 0) {
+        ESP_LOGI(TAG, "Server closed connection");
+    } else {
+        ESP_LOGE(TAG, "Receive failed");
+    }
+
+    // Close connection
+    shutdown(sock, 0);
+    close(sock);
+
+    ESP_LOGI(TAG, "Socket closed");
+
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    
+}
+
+
+
+
+
+
+
+
+
+void wifi_scan(void)
+{
+    wifi_scan_config_t scan_config = {
+        .ssid = NULL,
+        .bssid = NULL,
+        .channel = 0,
+        .show_hidden = true,
+        .scan_type = WIFI_SCAN_TYPE_ACTIVE,
+        .scan_time.active.min = 100,
+        .scan_time.active.max = 300,
+    };
+
+    ESP_ERROR_CHECK(esp_wifi_scan_start(&scan_config, true));
+
+    uint16_t ap_count = 0;
+
+    // Get number of APs found
+    ESP_ERROR_CHECK(esp_wifi_scan_get_ap_num(&ap_count));
+
+    printf("\nFound %u access points:\n", ap_count);
+    printf("------------------------------------------------------------\n");
+
+    if (ap_count == 0) {
+        return;
+    }
+
+    wifi_ap_record_t *ap_records =
+        malloc(ap_count * sizeof(wifi_ap_record_t));
+
+    if (ap_records == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate memory");
+        return;
+    }
+
+    // Get AP records
+    ESP_ERROR_CHECK(
+        esp_wifi_scan_get_ap_records(&ap_count, ap_records)
+    );
+
+    for (int i = 0; i < ap_count; i++) {
+        printf("%2d: SSID: %-32s  RSSI: %4d  CH: %2d  AUTH: %d\n",
+               i + 1,
+               (char *)ap_records[i].ssid,
+               ap_records[i].rssi,
+               ap_records[i].primary,
+               ap_records[i].authmode);
+    }
+
+    printf("------------------------------------------------------------\n");
+
+    free(ap_records);
+}
 
 
 // If SD card fails to format, it will be formated 
@@ -465,7 +863,7 @@ void GPX_file_error_correction(char *filename)
 
 }
 
-static const char *TAG2 = "GPIO_INT";
+//static const char *TAG2 = "GPIO_INT";
 
 static void IRAM_ATTR gpio_isr_handler(void* arg)
 {
@@ -723,10 +1121,10 @@ static void GPS_Read_Write_Task()
 
                 //printf("%f\n", HDOP);
 
-                printf("Time = %s, Number of satellites = %d, HDOP = %f\n", GPX_Time, num_of_sat, HDOP);
+                //printf("Time = %s, Number of satellites = %d, HDOP = %f\n", GPX_Time, num_of_sat, HDOP);
                 
                 // Filters valid data by precision
-                if (HDOP <= 5)
+                if (HDOP <= 2.5)
                 {
                     gpio_set_level(GPS_STATUS_LED, 1);
 
@@ -775,14 +1173,14 @@ static void GPS_Read_Write_Task()
                 
                 if (errno == EIO)
                 {
-                    printf("I/O error\n");
+                    //printf("I/O error\n");
                     card_reinitalization();
                 }
 
                 if (f_gpx == NULL)
                 {
                     fclose(f_gpx);
-                    printf("No such file or directory\n");
+                    //printf("No such file or directory\n");
                     generate_gpx_file(gpx_file_path);
                     f_gpx = fopen(gpx_file_path, "r+");
 
@@ -834,7 +1232,7 @@ static void GPS_Read_Write_Task()
                 int unix_time;
 
                 ConvertDateandTimeFormat(NMEA_data[1][9], NMEA_data[1][1], GPX_Time, &unix_time);
-                printf("Time = %s, Number of satellites = %d\n", GPX_Time, num_of_sat);
+                //printf("Time = %s, Number of satellites = %d\n", GPX_Time, num_of_sat);
                 
                 vTaskDelay(50);
                 gpio_set_level(GPS_STATUS_LED, 0);
@@ -854,8 +1252,32 @@ static void GPS_Read_Write_Task()
     }
 }
 
+
+
+
+
+
 void app_main(void)
 {
+    // Initialize NVS
+    esp_err_t ret = nvs_flash_init();
+
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
+        ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+
+    ESP_ERROR_CHECK(ret);
+
+    wifi_init_sta();
+
+    //xTaskCreate(tcp_client_task,"tcp_client",4096,NULL,5,NULL);
+
+    // Perform scan
+    //wifi_scan();
+
     GPIO_Setup();
 
     gpio_install_isr_service(0);
@@ -863,6 +1285,8 @@ void app_main(void)
     gpio_isr_handler_add(PIN_NUM_CD, gpio_isr_handler, (void*) PIN_NUM_CD);
     
     SD_Setup();
+
+    backup_gpx_files();
 
     UART_Setup();
  
