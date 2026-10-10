@@ -3,7 +3,6 @@
 // https://cdn.sparkfun.com/assets/parts/1/2/2/8/0/PMTK_Packet_User_Manual.pdf
 
 
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,6 +30,7 @@
 #include "esp_netif.h"
 #include "esp_wifi_netif.h"
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "lwip/err.h"
@@ -41,14 +41,15 @@
 #define BUF_SIZE (1024*8)
 #define EXAMPLE_MAX_CHAR_SIZE    2048
 #define MAX_PATH 32
+#define SDSPI_HOST_MAX_FREQ 20000
 
-char filename[100];
+char filename[256];
 char error_msg[100];
 char GPS_data[2048];
 char data[EXAMPLE_MAX_CHAR_SIZE];
 char GPS_output[EXAMPLE_MAX_CHAR_SIZE];
 char NMEA_data [6][15][15];
-char baud_rates[7][6] = {"4800", "9600", "14400", "19200", "38400", "57600", "115200"};
+const char *baud_rates[] = {"4800", "9600", "14400", "19200", "38400", "57600", "115200"};
 int baud_rate = 6;
 int CD_status = 0;
 int CD_status_old = 0;
@@ -100,6 +101,18 @@ static EventGroupHandle_t wifi_event_group;
 static int retry_count = 0;
 #define MAX_RETRY 5
 
+static void log_memory(const char *where)
+{
+    ESP_LOGI(TAG, "[MEM] %s", where);
+    ESP_LOGI(TAG, "      Free heap: %lu",
+             (unsigned long)esp_get_free_heap_size());
+    ESP_LOGI(TAG, "      Min free heap: %lu",
+             (unsigned long)esp_get_minimum_free_heap_size());
+    ESP_LOGI(TAG, "      Largest block: %lu",
+             (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    ESP_LOGI(TAG, "      Stack watermark: %u",
+             (unsigned)uxTaskGetStackHighWaterMark(NULL));
+}
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
@@ -204,101 +217,19 @@ static void wifi_init_sta(void)
 }
 
 
-void tcp_client_task(void *pvParameters)
-{
-    char rx_buffer[128];
-
-    
-
-    while (1) {
-
-        ESP_LOGI(TAG, "Creating socket...");
-
-        int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
-
-        if (sock < 0) {
-            ESP_LOGE(TAG, "Unable to create socket");
-            vTaskDelay(pdMS_TO_TICKS(1000));
-            continue;
-        }
-
-        struct sockaddr_in dest_addr = {
-            .sin_family = AF_INET,
-            .sin_port = htons(SERVER_PORT),
-            .sin_addr.s_addr = inet_addr(SERVER_IP)
-        };
-
-        ESP_LOGI(TAG, "Connecting to %s:%d",
-                 SERVER_IP, SERVER_PORT);
-
-        int err = connect(
-            sock,
-            (struct sockaddr *)&dest_addr,
-            sizeof(dest_addr)
-        );
-
-        if (err != 0) {
-            ESP_LOGE(TAG, "Connection failed: errno %d", errno);
-            close(sock);
-
-            vTaskDelay(pdMS_TO_TICKS(1000));
-            continue;
-        }
-
-        ESP_LOGI(TAG, "Connected!");
-
-        // Send data
-        const char *message = "lat long etc\n";
-
-        int sent = send(
-            sock,
-            message,
-            strlen(message),
-            0
-        );
-
-        if (sent < 0) {
-            ESP_LOGE(TAG, "Send failed");
-            close(sock);
-
-            vTaskDelay(pdMS_TO_TICKS(1000));
-            continue;
-        }
-
-        ESP_LOGI(TAG, "Sent: %s", message);
-
-        // Receive response
-        int len = recv(
-            sock,
-            rx_buffer,
-            sizeof(rx_buffer) - 1,
-            0
-        );
-
-        if (len > 0) {
-            rx_buffer[len] = '\0';
-
-            ESP_LOGI(TAG, "Received: %s", rx_buffer);
-        } else if (len == 0) {
-            ESP_LOGI(TAG, "Server closed connection");
-        } else {
-            ESP_LOGE(TAG, "Receive failed");
-        }
-
-        // Close connection
-        shutdown(sock, 0);
-        close(sock);
-
-        ESP_LOGI(TAG, "Socket closed");
-
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-}
-
 void backup_gpx_files(void)
 {
-    char rx_buffer[128];
+    ESP_LOGI(TAG, "BEFORE backup_gpx_files()");
+    log_memory("entry");
 
+    heap_caps_check_integrity_all(true);
+
+    static uint8_t rx_buffer[1024*16];
+    
+    ESP_LOGI(TAG, "Stack watermark before: %u",
+         (unsigned)uxTaskGetStackHighWaterMark(NULL));
+
+/*
     ESP_LOGI(TAG, "Creating socket...");
 
     int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
@@ -315,8 +246,7 @@ void backup_gpx_files(void)
         .sin_addr.s_addr = inet_addr(SERVER_IP)
     };
 
-    ESP_LOGI(TAG, "Connecting to %s:%d",
-            SERVER_IP, SERVER_PORT);
+    ESP_LOGI(TAG, "Connecting to %s:%d",SERVER_IP, SERVER_PORT);
 
     int err = connect(
         sock,
@@ -333,21 +263,85 @@ void backup_gpx_files(void)
     }
 
     ESP_LOGI(TAG, "Connected!");
-
+*/
 
     struct dirent *entry;
     
-    DIR *dir = opendir("/sdcard"); 
+    DIR *dir = opendir("/sdcard/"); 
 
     if (dir == NULL) {
-        printf("Could not open directory.\n"); 
+        ESP_LOGE(TAG, "Failed to open /sdcard");
+        perror("opendir");
+        return;
     }
 
     // Loop through and print all file and folder names
     while ((entry = readdir(dir)) != NULL) {
-        strcpy(filename, entry->d_name);
+        ESP_LOGI(TAG, "Found: %s", entry->d_name);
 
-        if (strncmp(filename, "DATA", 4) == 0)
+        if (strncmp(entry->d_name, "DATA", 4) == 0 && strstr(entry->d_name, ".gpx") != NULL) {
+            struct stat st;
+            
+
+            int ret = snprintf(filename, sizeof(filename), "/sdcard/%s", entry->d_name);
+
+            if (ret < 0 || ret >= sizeof(filename)) {
+                ESP_LOGE(TAG, "Filename too long");
+                continue;
+            }
+        
+            if (stat(filename, &st) == 0) {
+                printf("File exists, size=%" PRIdMAX "\n", (intmax_t)st.st_size);
+            } else {
+                printf("File does not exist, errno=%d\n", errno);
+            }
+
+            FILE *file = fopen(filename, "rb");
+
+            if (file == NULL) {
+                ESP_LOGE("example", "fopen failed, errno=%d", errno);
+                return;
+            }
+
+            size_t total = 0;
+
+            
+
+            while (1) {
+                size_t n = fread(rx_buffer, 1, sizeof(rx_buffer), file);
+
+                if (n > 0) {
+                    total += n;
+                }
+
+                if (ferror(file)) {
+                    ESP_LOGE(TAG, "fread failed at %u, errno=%d (%s)",
+                            (unsigned)total,
+                            errno,
+                            strerror(errno));
+                    break;
+                }
+
+                if (feof(file)) {
+                    ESP_LOGI(TAG, "EOF: %u", (unsigned)total);
+                    break;
+                }
+
+                vTaskDelay(pdMS_TO_TICKS(1));
+            }
+
+            ESP_LOGI(TAG, "EOF: %zu", total);
+
+            log_memory(filename);
+
+            if (!heap_caps_check_integrity_all(true)) {
+                ESP_LOGE(TAG, "HEAP CORRUPTION DETECTED after %s", filename);
+            }
+
+            fclose(file);
+        }
+
+        /*if (strncmp(filename, "DATA", 4) == 0)
         {  
             // Send data
             //const char *message = "lat long etc\n";
@@ -364,60 +358,97 @@ void backup_gpx_files(void)
 
                 vTaskDelay(pdMS_TO_TICKS(1000));
                 
-            }  
-        }   
+            }
+
+            int len = recv(
+                sock,
+                rx_buffer,
+                sizeof(rx_buffer) - 1,
+                0
+            );
+
+            if (len > 0) {
+                rx_buffer[len] = '\0';
+                
+
+                if (strcmp(rx_buffer, "File not found") == 0)
+                {
+                    printf("File not found\n");
+                    
+                    char gpx_file_path[100];
+
+                   
+
+                    gpx_file_path[0] = '\0';
+                    
+
+                    strcat(gpx_file_path, "/sdcard/");
+                    
+                    strcat(gpx_file_path, filename);
+
+                    
+
+                    
+                    
+                    while (fgets(rx_buffer, sizeof(rx_buffer), file) != NULL) {
+                        // Process the line (e.g., print it)
+                        
+                        sent = send(
+                            sock,
+                            rx_buffer,
+                            strlen(rx_buffer),
+                            0
+                        );
+                    }
+
+
+
+                }
+            }
+            else if (len == 0) {
+                ESP_LOGI(TAG, "Server closed connection");
+            }
+            else {
+                ESP_LOGE(TAG, "Receive failed");
+            }
+
+        }   */
     }
 
     closedir(dir);
 
 
+    // Close connection
+    //shutdown(sock, 0);
+    //close(sock);
 
+    ESP_LOGI(TAG, "Before socket close");
 
+    heap_caps_check_integrity_all(true);
 
+    ESP_LOGI(TAG, "Free heap: %lu",
+            (unsigned long)esp_get_free_heap_size());
 
+    ESP_LOGI(TAG, "Min free heap: %lu",
+            (unsigned long)esp_get_minimum_free_heap_size());
 
+    ESP_LOGI(TAG, "Largest block: %lu",
+            (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
 
+    log_memory("BEFORE backup_gpx_files() return");
 
-
-
-    
-
-    
-
-    // Receive response
-    int len = recv(
-        sock,
-        rx_buffer,
-        sizeof(rx_buffer) - 1,
-        0
-    );
-
-    if (len > 0) {
-        rx_buffer[len] = '\0';
-
-        ESP_LOGI(TAG, "Received: %s", rx_buffer);
-    } else if (len == 0) {
-        ESP_LOGI(TAG, "Server closed connection");
-    } else {
-        ESP_LOGE(TAG, "Receive failed");
+    if (!heap_caps_check_integrity_all(true)) {
+        ESP_LOGE(TAG, "HEAP CORRUPTION DETECTED before backup_gpx_files() return!");
     }
 
-    // Close connection
-    shutdown(sock, 0);
-    close(sock);
+    ESP_LOGI(TAG, "Returning from backup_gpx_files()");
 
     ESP_LOGI(TAG, "Socket closed");
 
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    
+    //vTaskDelay(pdMS_TO_TICKS(1000));
+    ESP_LOGI(TAG, "Stack watermark after: %u",
+         (unsigned)uxTaskGetStackHighWaterMark(NULL));
 }
-
-
-
-
-
-
-
 
 
 void wifi_scan(void)
@@ -490,6 +521,7 @@ sdmmc_card_t *card;
 const char mount_point[] = MOUNT_POINT;
 
 sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+
 
 
 // SD cards spi bus is configured
@@ -585,15 +617,13 @@ void ConvertDateandTimeFormat(const char* DateStr, const char* TimeStr, char* re
 
     *unix_time = mktime(&time);
 
-    sprintf(result_gpx, "20%02d-%02d-%02dT%02d:%02d:%06.3fZ", year, month, day, hour, minute, second);
-
-    //sprintf(unix_time, "20%02d%02d%02d%02d%02d%06.3f", year, month, day, hour, minute, second); 
+    sprintf(result_gpx, "20%02d-%02d-%02dT%02d:%02d:%06.3fZ", year, month, day, hour, minute, second); 
 }
 
 // If an error occurs, this function can write an error message to a text file on the SD card
 void Write_Error(char *error_msg)
 {
-    char error_file_path[18] = "/sdcard/ERROR.txt\0";                   
+    const char *error_file_path = "/sdcard/ERROR.txt";                   
     f_error = fopen(error_file_path, "a+");
     fprintf(f_error, error_msg);
     fclose(f_error);
@@ -607,6 +637,8 @@ void SD_Setup(void)
     sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
     slot_config.gpio_cs = 4;
     slot_config.host_id = host.slot;
+    
+    host.max_freq_khz = SDSPI_HOST_MAX_FREQ;
 
     // Attempts to initalize the spi bus
     ret = spi_bus_initialize(host.slot, &bus_cfg, SDSPI_DEFAULT_DMA);
@@ -957,11 +989,11 @@ void UART_Setup()
     uart_flush_input(UART_NUM_1);
 
 
-    int actual_baudrate;
+    uint32_t actual_baudrate;
 
     uart_get_baudrate(UART_NUM_1, &actual_baudrate);
 
-    printf("Output Baudrate: %d\n", actual_baudrate);
+    printf("Actual baud rate: %" PRIu32 "\n", actual_baudrate);
 
 
 }
@@ -994,8 +1026,12 @@ static void GPS_Read_Write_Task()
             printf("Button was pressed\n");
         }
 
+        ESP_LOGI(TAG, "GPS_data size=%zu, BUF_SIZE=%d",
+            sizeof(GPS_data), BUF_SIZE);
 
-        int len = uart_read_bytes(UART_NUM_1, GPS_data, BUF_SIZE, 5);
+        int len = uart_read_bytes(UART_NUM_1, GPS_data, sizeof(GPS_data), 5);
+
+        ESP_LOGI(TAG, "GPS bytes read=%d", len);
 
         if (len>0 && card_inserted == true)
         { 
@@ -1253,10 +1289,6 @@ static void GPS_Read_Write_Task()
 }
 
 
-
-
-
-
 void app_main(void)
 {
     // Initialize NVS
@@ -1271,7 +1303,7 @@ void app_main(void)
 
     ESP_ERROR_CHECK(ret);
 
-    wifi_init_sta();
+    //wifi_init_sta();
 
     //xTaskCreate(tcp_client_task,"tcp_client",4096,NULL,5,NULL);
 
@@ -1286,9 +1318,23 @@ void app_main(void)
     
     SD_Setup();
 
-    backup_gpx_files();
-
     UART_Setup();
+
+    ESP_LOGI(TAG, "BEFORE backup_gpx_files()");
+    backup_gpx_files();
+    ESP_LOGI(TAG, "AFTER backup_gpx_files()");
+
+    vTaskDelay(pdMS_TO_TICKS(1000));
+
+    ESP_LOGI(TAG, "ONE SECOND AFTER backup");
+
+    heap_caps_check_integrity_all(true);
+
+    log_memory("one second after backup");
+
+    ESP_LOGI(TAG, "About to continue");
+
+    ESP_LOGI(TAG, "ONE SECOND AFTER backup");
  
     GPS_Read_Write_Task();
 }
