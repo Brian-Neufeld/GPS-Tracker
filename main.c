@@ -87,8 +87,8 @@ static const char *TAG = "example";
 #define PIN_NUM_CD    7
 
 // initalizes wifi stuff
-#define WIFI_SSID     "1209-2.4"
-#define WIFI_PASSWORD "103ducks"
+#define WIFI_SSID     ""
+#define WIFI_PASSWORD ""
 
 #define SERVER_IP   "10.0.0.15"
 #define SERVER_PORT 5000
